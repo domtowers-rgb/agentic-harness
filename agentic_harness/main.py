@@ -20,8 +20,10 @@ plugins.load_plugins()
 MODEL_BACKEND = os.environ.get("AGENTIC_MODEL", "mock")
 if MODEL_BACKEND == "openai":
     model_impl = model.OpenAIModel()
+    CURRENT_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 else:
     model_impl = model.MockModel()
+    CURRENT_BASE_URL = ""
 
 
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
@@ -100,6 +102,32 @@ async def list_models():
     except Exception:
         ids = []
     return JSONResponse(content={"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
+
+
+@app.get("/v1/status")
+async def status():
+    return JSONResponse(content={"backend": MODEL_BACKEND, "base_url": CURRENT_BASE_URL})
+
+
+@app.post("/v1/connect")
+async def connect(request: Request):
+    global model_impl, MODEL_BACKEND, CURRENT_BASE_URL
+    body = await request.json()
+    base_url = (body.get("base_url") or "").strip()
+    api_key = (body.get("api_key") or "").strip() or None
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+
+    try:
+        candidate = model.OpenAIModel(api_key=api_key, base_url=base_url)
+        ids = await asyncio.to_thread(candidate.list_models)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"could not connect to {base_url}: {exc}")
+
+    model_impl = candidate
+    MODEL_BACKEND = "openai"
+    CURRENT_BASE_URL = base_url
+    return JSONResponse(content={"status": "connected", "base_url": base_url, "models": ids})
 
 
 @app.post("/v1/chat/completions")

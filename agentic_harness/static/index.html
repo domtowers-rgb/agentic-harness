@@ -28,10 +28,11 @@
   }
   header {
     padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+    display: flex; flex-direction: column; gap: 0.5rem;
   }
   header h1 { font-size: 0.95rem; font-weight: 600; margin: 0; white-space: nowrap; }
-  header select {
+  .controls { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  header select, header input[type=text] {
     flex: 1; min-width: 8rem; font-size: 0.85rem; padding: 0.35rem 0.5rem;
     background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
   }
@@ -40,6 +41,10 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer;
   }
   header button:hover { background: var(--bubble-assistant); }
+  header button:disabled { opacity: 0.5; cursor: default; }
+  .status { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+  .status.ok { color: #1a7f37; }
+  .status.err { color: #b3261e; }
   main {
     flex: 1; overflow-y: auto; padding: 1rem;
     display: flex; flex-direction: column; gap: 0.6rem;
@@ -80,10 +85,17 @@
 <body>
   <header>
     <h1>Agentic LLM Harness</h1>
-    <select id="model">
-      <option value="">(server default)</option>
-    </select>
-    <button id="clear">Clear chat</button>
+    <div class="controls">
+      <input id="endpoint" type="text" placeholder="API endpoint, e.g. http://127.0.0.1:1234/v1">
+      <button id="connect">Connect</button>
+      <span id="connStatus" class="status"></span>
+    </div>
+    <div class="controls">
+      <select id="model">
+        <option value="">(server default)</option>
+      </select>
+      <button id="clear">Clear chat</button>
+    </div>
   </header>
   <main id="log"></main>
   <div class="hint">Enter to send &middot; Shift+Enter for newline</div>
@@ -98,6 +110,9 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const modelField = document.getElementById('model');
 const clearBtn = document.getElementById('clear');
+const endpointField = document.getElementById('endpoint');
+const connectBtn = document.getElementById('connect');
+const connStatus = document.getElementById('connStatus');
 
 let history = [];
 let controller = null;
@@ -117,7 +132,66 @@ async function loadModels() {
     // no models available from the backend - keep just the default option
   }
 }
+
+async function refreshModelOptions() {
+  modelField.innerHTML = '<option value="">(server default)</option>';
+  await loadModels();
+}
 loadModels();
+
+async function loadStatus() {
+  try {
+    const resp = await fetch('/v1/status');
+    if (!resp.ok) return;
+    const body = await resp.json();
+    if (body.base_url) {
+      endpointField.value = body.base_url;
+      connStatus.textContent = 'connected';
+      connStatus.className = 'status ok';
+    } else {
+      connStatus.textContent = 'using built-in mock backend';
+      connStatus.className = 'status';
+    }
+  } catch {
+    // ignore - status is informational only
+  }
+}
+loadStatus();
+
+async function connect() {
+  const url = endpointField.value.trim();
+  if (!url) return;
+  connectBtn.disabled = true;
+  connStatus.textContent = 'connecting…';
+  connStatus.className = 'status';
+  try {
+    const resp = await fetch('/v1/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_url: url }),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      throw new Error(body.detail || ('server returned ' + resp.status));
+    }
+    connStatus.textContent = 'connected';
+    connStatus.className = 'status ok';
+    await refreshModelOptions();
+  } catch (err) {
+    connStatus.textContent = 'failed: ' + err.message;
+    connStatus.className = 'status err';
+  } finally {
+    connectBtn.disabled = false;
+  }
+}
+
+connectBtn.addEventListener('click', connect);
+endpointField.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    connect();
+  }
+});
 
 function addBubble(role, text) {
   const el = document.createElement('div');

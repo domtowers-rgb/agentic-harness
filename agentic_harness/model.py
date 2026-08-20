@@ -21,10 +21,13 @@ class BaseModel:
 
 
 class OpenAIModel(BaseModel):
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         if OpenAI is None:
             raise RuntimeError("openai package is required for OpenAIModel")
-        self._client = OpenAI(api_key=api_key or os.environ.get("OPENAI_API_KEY"))
+        resolved_key = api_key or os.environ.get("OPENAI_API_KEY") or "not-needed"
+        resolved_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self._client = OpenAI(api_key=resolved_key, base_url=resolved_base_url)
+        self.base_url = resolved_base_url
 
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None, **kwargs) -> Dict:
         params = {
