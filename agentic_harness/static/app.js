@@ -12,6 +12,7 @@ const settingsBtn = document.getElementById('settingsBtn');
 const settingsOverlay = document.getElementById('settingsOverlay');
 const settingsClose = document.getElementById('settingsClose');
 const pluginListEl = document.getElementById('pluginList');
+const conversationListEl = document.getElementById('conversationList');
 
 sidebarToggle.addEventListener('click', () => {
   sidebar.classList.toggle('collapsed');
@@ -19,6 +20,162 @@ sidebarToggle.addEventListener('click', () => {
 
 let history = [];
 let controller = null;
+
+// conversations: every saved conversation, as {id, title, messages, updatedAt}.
+// currentConversationId: which one (if any) the current view corresponds to -
+//   null means "not saved yet" (a brand new, still-empty chat).
+let conversations = [];
+let currentConversationId = null;
+
+function loadConversationsFromStorage() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('conversations') || '[]');
+    if (Array.isArray(saved)) return saved;
+  } catch {
+    // ignore malformed storage - start with no saved conversations
+  }
+  return [];
+}
+
+function saveConversationsToStorage() {
+  try {
+    localStorage.setItem('conversations', JSON.stringify(conversations));
+  } catch {
+    // storage full/unavailable - persistence just won't stick this time
+  }
+}
+
+function loadCurrentConversationId() {
+  try {
+    return localStorage.getItem('currentConversationId') || null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCurrentConversationId() {
+  try {
+    if (currentConversationId) {
+      localStorage.setItem('currentConversationId', currentConversationId);
+    } else {
+      localStorage.removeItem('currentConversationId');
+    }
+  } catch {
+    // ignore - just won't resume into this conversation on next page load
+  }
+}
+
+function renderConversationList() {
+  conversationListEl.innerHTML = '';
+  if (!conversations.length) {
+    const empty = document.createElement('div');
+    empty.className = 'conversation-empty';
+    empty.textContent = 'No saved conversations yet';
+    conversationListEl.appendChild(empty);
+    return;
+  }
+
+  const sorted = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const conv of sorted) {
+    const row = document.createElement('div');
+    row.className = 'conversation-row' + (conv.id === currentConversationId ? ' active' : '');
+
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = conv.title;
+    title.title = conv.title;
+    row.appendChild(title);
+
+    const del = document.createElement('button');
+    del.className = 'delete-btn';
+    del.textContent = '✕';
+    del.title = 'Delete conversation';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteConversation(conv.id);
+    });
+    row.appendChild(del);
+
+    row.addEventListener('click', () => loadConversation(conv.id));
+    conversationListEl.appendChild(row);
+  }
+}
+
+function renderHistoryIntoLog() {
+  log.innerHTML = '';
+  for (const msg of history) {
+    if (msg.role === 'user') {
+      addBubble('user', msg.content);
+    } else if (msg.role === 'assistant') {
+      const { bubble } = addAssistantTurn();
+      bubble.innerHTML = renderMarkdown(msg.content || '');
+    }
+  }
+}
+
+function deleteConversation(id) {
+  conversations = conversations.filter((c) => c.id !== id);
+  saveConversationsToStorage();
+  if (id === currentConversationId) {
+    startNewConversation();
+  } else {
+    renderConversationList();
+  }
+}
+
+function loadConversation(id) {
+  const conv = conversations.find((c) => c.id === id);
+  if (!conv || id === currentConversationId) return;
+  if (controller) controller.abort();
+  currentConversationId = id;
+  saveCurrentConversationId();
+  history = conv.messages.map((m) => ({ ...m }));
+  activeEnabled = new Set(pendingEnabled);
+  renderHistoryIntoLog();
+  renderConversationList();
+}
+
+function startNewConversation() {
+  if (controller) controller.abort();
+  currentConversationId = null;
+  saveCurrentConversationId();
+  history = [];
+  log.innerHTML = '';
+  activeEnabled = new Set(pendingEnabled);
+  renderConversationList();
+}
+
+function saveCurrentConversation() {
+  if (!history.length) return;
+  const now = Date.now();
+  if (!currentConversationId) {
+    currentConversationId = window.crypto && window.crypto.randomUUID
+      ? window.crypto.randomUUID()
+      : 'c' + now + Math.random().toString(36).slice(2);
+    saveCurrentConversationId();
+    const firstUser = history.find((m) => m.role === 'user');
+    const title = ((firstUser && firstUser.content) || 'New conversation').slice(0, 48);
+    conversations.push({ id: currentConversationId, title, messages: history, updatedAt: now });
+  } else {
+    const conv = conversations.find((c) => c.id === currentConversationId);
+    if (conv) {
+      conv.messages = history;
+      conv.updatedAt = now;
+    }
+  }
+  saveConversationsToStorage();
+  renderConversationList();
+}
+
+conversations = loadConversationsFromStorage();
+const savedConversationId = loadCurrentConversationId();
+const savedConversation = savedConversationId && conversations.find((c) => c.id === savedConversationId);
+if (savedConversation) {
+  currentConversationId = savedConversation.id;
+  history = savedConversation.messages.map((m) => ({ ...m }));
+  renderHistoryIntoLog();
+}
+renderConversationList();
 
 // allPlugins: every plugin the server has loaded.
 // pendingEnabled: what the settings checkboxes currently show (persisted to localStorage).
@@ -172,6 +329,90 @@ endpointField.addEventListener('keydown', (e) => {
   }
 });
 
+// Minimal, dependency-free markdown renderer for assistant messages. Escapes
+// HTML first, so any markup in the source (model output, or text the model
+// pulled in via fetch_url) can't inject real tags - only the elements we
+// generate below are trusted.
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function renderInline(text) {
+  return text
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+function renderMarkdown(src) {
+  const lines = escapeHtml(src).split('\n');
+  const out = [];
+  let inCode = false;
+  let codeLines = [];
+  let listType = null; // 'ul' | 'ol' | null
+  let listItems = [];
+
+  function flushList() {
+    if (listType) {
+      out.push(`<${listType}>` + listItems.map((li) => `<li>${renderInline(li)}</li>`).join('') + `</${listType}>`);
+      listType = null;
+      listItems = [];
+    }
+  }
+  function flushCode() {
+    if (inCode) {
+      out.push(`<pre><code>${codeLines.join('\n')}</code></pre>`);
+      inCode = false;
+      codeLines = [];
+    }
+  }
+
+  for (const rawLine of lines) {
+    if (/^```/.test(rawLine)) {
+      if (inCode) {
+        flushCode();
+      } else {
+        flushList();
+        inCode = true;
+        codeLines = [];
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(rawLine);
+      continue;
+    }
+
+    const heading = rawLine.match(/^(#{1,6})\s+(.*)/);
+    if (heading) {
+      flushList();
+      const level = heading[1].length;
+      out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const ordered = rawLine.match(/^\d+\.\s+(.*)/);
+    const unordered = rawLine.match(/^[-*]\s+(.*)/);
+    if (ordered || unordered) {
+      const type = ordered ? 'ol' : 'ul';
+      if (listType && listType !== type) flushList();
+      listType = type;
+      listItems.push((ordered || unordered)[1]);
+      continue;
+    }
+    flushList();
+
+    out.push(rawLine.trim() === '' ? '' : `<p>${renderInline(rawLine)}</p>`);
+  }
+  flushList();
+  flushCode(); // in case a fence was left unclosed mid-stream
+
+  return out.join('\n');
+}
+
 function addBubble(role, text) {
   const el = document.createElement('div');
   el.className = 'msg ' + role;
@@ -223,14 +464,7 @@ function setBusy(busy) {
   sendBtn.classList.toggle('stop', busy);
 }
 
-newChatBtn.addEventListener('click', () => {
-  if (controller) {
-    controller.abort();
-  }
-  history = [];
-  log.innerHTML = '';
-  activeEnabled = new Set(pendingEnabled);
-});
+newChatBtn.addEventListener('click', startNewConversation);
 
 sendBtn.addEventListener('click', () => {
   if (controller) {
@@ -338,7 +572,7 @@ async function submit() {
             setTyping(assistantEl, false);
           }
           assistantText += delta.content;
-          assistantEl.textContent = assistantText;
+          assistantEl.innerHTML = renderMarkdown(assistantText);
           log.scrollTop = log.scrollHeight;
           toolEl = null; // a new round of real content started
         }
@@ -358,6 +592,7 @@ async function submit() {
     if (reasoningText) {
       addReasoningToggle(assistantWrapper, reasoningText);
     }
+    saveCurrentConversation();
     controller = null;
     setBusy(false);
     input.focus();
