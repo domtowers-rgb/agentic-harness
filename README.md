@@ -2,9 +2,27 @@
 
 Lightweight OpenAI-compatible harness that exposes a small subset of the Chat Completions API and supports a plugin architecture for function calls.
 
+Repository: https://github.com/domtowers-rgb/agentic-harness
+
+Install
+
+One-line install (clones the repo, creates a venv, installs dependencies):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/domtowers-rgb/agentic-harness/main/install.sh | bash
+```
+
+Or clone it yourself and run `install.sh`:
+
+```bash
+git clone https://github.com/domtowers-rgb/agentic-harness.git
+cd agentic-harness
+./install.sh
+```
+
 Quick start
 
-1. Install dependencies:
+1. Install dependencies (skip if you used `install.sh` above):
 
 ```bash
 pip install -r requirements.txt
@@ -21,8 +39,8 @@ python -m agentic_harness.main
 Environment
 
 - `AGENTIC_MODEL`: `mock` (default) or `openai` to use an OpenAI-compatible API.
-- `OPENAI_API_KEY`: required by the SDK; any non-empty string works for local servers that don't check it.
-- `OPENAI_BASE_URL`: point at a local OpenAI-compatible server (e.g. `http://127.0.0.1:1234/v1` for LM Studio, `http://127.0.0.1:11434/v1` for Ollama). Omit to use the real OpenAI API.
+- `OPENAI_API_KEY`: used if set; otherwise falls back to a placeholder value, which works fine for local servers that don't check it. Set a real key to use the actual OpenAI API.
+- `OPENAI_BASE_URL`: point at a local OpenAI-compatible server (e.g. `http://127.0.0.1:1234/v1` for LM Studio, `http://127.0.0.1:11434/v1` for Ollama). Omit to use the real OpenAI API. Can also be set at runtime from the web UI's sidebar (API endpoint field + Connect button), without restarting the server.
 - `AGENTIC_DEFAULT_MODEL`: model name used when a request omits `model` (default `gpt-4o-mini`). Set this to your loaded local model's id when using a local server.
 - `AGENTIC_MAX_TOOL_ITERATIONS`: cap on tool-call round trips per request before giving up (default `8`).
 
