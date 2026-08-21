@@ -6,3 +6,4 @@ env/
 .env
 *.egg-info/
 .pytest_cache/
+workspace/

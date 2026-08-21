@@ -39,3 +39,18 @@ python -m agentic_harness.main
 Plugins
 
 Plugins live in the `plugins/` folder. Each module should expose a `register(registry)` function that calls `registry.register(name, callable, spec)`.
+
+Built-in plugins:
+
+- `calculate` - safe arithmetic (AST-based, no `eval`).
+- `get_current_time` - current date/time, optionally in an IANA timezone.
+- `fetch_url` - fetch a public http(s) URL's text. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection).
+- `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY`; without it, the tool reports a clear error instead of failing silently.
+- `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
+- `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
+
+Additional environment variables used by the built-in plugins:
+
+- `AGENTIC_FILES_DIR`: sandbox directory for `read_file`/`write_file`/`list_files`/`run_command` (default `workspace/`).
+- `AGENTIC_ENABLE_SHELL`: set to `1` to enable `run_command`.
+- `BRAVE_API_KEY`: enables `web_search`.
