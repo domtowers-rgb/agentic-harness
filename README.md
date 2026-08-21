@@ -74,3 +74,12 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_FILES_DIR`: sandbox directory for `read_file`/`write_file`/`list_files`/`run_command` (default `workspace/`).
 - `AGENTIC_ENABLE_SHELL`: set to `1` to enable `run_command`.
 - `BRAVE_API_KEY`: enables `web_search`.
+
+Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Runs on push/PR via GitHub Actions (`.github/workflows/tests.yml`). A couple of `fetch_url` tests hit a real public URL (`example.com`) and skip themselves if the network is unavailable rather than failing.
