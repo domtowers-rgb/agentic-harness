@@ -6,6 +6,7 @@ const newChatBtn = document.getElementById('newChat');
 const endpointField = document.getElementById('endpoint');
 const connectBtn = document.getElementById('connect');
 const connStatus = document.getElementById('connStatus');
+const sidebarStatus = document.getElementById('sidebarStatus');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
 const settingsBtn = document.getElementById('settingsBtn');
@@ -275,6 +276,17 @@ async function refreshModelOptions() {
 }
 loadModels();
 
+// Reflects the stable, current connection state - not transient states like
+// "connecting…"/"failed: ..." (those stay in the settings modal itself,
+// visible only while you're actively looking at the Connect button).
+function setConnected(isConnected) {
+  const text = isConnected ? 'connected' : 'mock backend';
+  connStatus.textContent = text;
+  connStatus.className = 'status' + (isConnected ? ' ok' : '');
+  sidebarStatus.textContent = text;
+  sidebarStatus.className = 'status' + (isConnected ? ' ok' : '');
+}
+
 async function loadStatus() {
   try {
     const resp = await fetch('/v1/status');
@@ -282,12 +294,8 @@ async function loadStatus() {
     const body = await resp.json();
     if (body.base_url) {
       endpointField.value = body.base_url;
-      connStatus.textContent = 'connected';
-      connStatus.className = 'status ok';
-    } else {
-      connStatus.textContent = 'using built-in mock backend';
-      connStatus.className = 'status';
     }
+    setConnected(!!body.base_url);
   } catch {
     // ignore - status is informational only
   }
@@ -310,8 +318,7 @@ async function connect() {
     if (!resp.ok) {
       throw new Error(body.detail || ('server returned ' + resp.status));
     }
-    connStatus.textContent = 'connected';
-    connStatus.className = 'status ok';
+    setConnected(true);
     await refreshModelOptions();
   } catch (err) {
     connStatus.textContent = 'failed: ' + err.message;

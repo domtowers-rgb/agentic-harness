@@ -9,35 +9,41 @@
 <body>
   <aside id="sidebar">
     <h1>Agentic LLM Harness</h1>
-    <div class="sidebar-top-row">
-      <button id="newChat" class="new-chat-btn">+ New chat</button>
-      <button id="settingsBtn" class="icon-btn" title="Plugin settings">⚙</button>
+    <div class="sidebar-section">
+      <div class="sidebar-top-row">
+        <button id="newChat" class="new-chat-btn">+ New chat</button>
+        <button id="settingsBtn" class="icon-btn" title="Settings">⚙</button>
+      </div>
+      <span id="sidebarStatus" class="status"></span>
     </div>
     <div class="sidebar-section">
       <label class="field-label">Conversations</label>
       <div id="conversationList" class="conversation-list"></div>
     </div>
-    <div class="sidebar-section">
-      <label class="field-label" for="endpoint">API endpoint</label>
-      <input id="endpoint" type="text" placeholder="http://127.0.0.1:1234/v1">
-      <button id="connect">Connect</button>
-      <span id="connStatus" class="status"></span>
-    </div>
-    <div class="sidebar-section">
-      <label class="field-label" for="model">Model</label>
-      <select id="model">
-        <option value="">(server default)</option>
-      </select>
-    </div>
   </aside>
   <div id="settingsOverlay" class="overlay hidden">
     <div class="modal">
       <div class="modal-header">
-        <h2>Plugins</h2>
+        <h2>Settings</h2>
         <button id="settingsClose" class="icon-btn" title="Close">✕</button>
       </div>
-      <div id="pluginList" class="plugin-list"></div>
-      <div class="hint">Changes apply the next time you start a new chat.</div>
+      <div class="sidebar-section">
+        <label class="field-label" for="endpoint">API endpoint</label>
+        <input id="endpoint" type="text" placeholder="http://127.0.0.1:1234/v1">
+        <button id="connect">Connect</button>
+        <span id="connStatus" class="status"></span>
+      </div>
+      <div class="sidebar-section">
+        <label class="field-label" for="model">Model</label>
+        <select id="model">
+          <option value="">(server default)</option>
+        </select>
+      </div>
+      <div class="sidebar-section">
+        <label class="field-label">Plugins</label>
+        <div id="pluginList" class="plugin-list"></div>
+        <div class="hint">Changes apply the next time you start a new chat.</div>
+      </div>
     </div>
   </div>
   <div class="main-panel">

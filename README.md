@@ -40,7 +40,7 @@ Environment
 
 - `AGENTIC_MODEL`: `mock` (default) or `openai` to use an OpenAI-compatible API.
 - `OPENAI_API_KEY`: used if set; otherwise falls back to a placeholder value, which works fine for local servers that don't check it. Set a real key to use the actual OpenAI API.
-- `OPENAI_BASE_URL`: point at a local OpenAI-compatible server (e.g. `http://127.0.0.1:1234/v1` for LM Studio, `http://127.0.0.1:11434/v1` for Ollama). Omit to use the real OpenAI API. Can also be set at runtime from the web UI's sidebar (API endpoint field + Connect button), without restarting the server.
+- `OPENAI_BASE_URL`: point at a local OpenAI-compatible server (e.g. `http://127.0.0.1:1234/v1` for LM Studio, `http://127.0.0.1:11434/v1` for Ollama). Omit to use the real OpenAI API. Can also be set at runtime from the web UI's settings (⚙) panel (API endpoint field + Connect button), without restarting the server.
 - `AGENTIC_DEFAULT_MODEL`: model name used when a request omits `model` (default `gpt-4o-mini`). Set this to your loaded local model's id when using a local server.
 - `AGENTIC_MAX_TOOL_ITERATIONS`: cap on tool-call round trips per request before giving up (default `8`).
 
