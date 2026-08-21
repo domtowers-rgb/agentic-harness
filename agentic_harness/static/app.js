@@ -451,6 +451,16 @@ function addReasoningToggle(wrapper, reasoningText) {
   wrapper.appendChild(panel);
 }
 
+function addStatsLine(wrapper, tokensPerSecond, isReal) {
+  const stats = document.createElement('div');
+  stats.className = 'turn-stats';
+  stats.textContent = (isReal ? '' : '~') + tokensPerSecond.toFixed(1) + ' tok/s';
+  if (!isReal) {
+    stats.title = 'Estimated from response length - the backend did not report token usage';
+  }
+  wrapper.appendChild(stats);
+}
+
 function setTyping(el, on) {
   el.classList.toggle('pending', on);
   if (on) {
@@ -496,6 +506,9 @@ async function submit() {
   let gotContent = false;
   let toolEl = null;
   let reasoningText = '';
+  let completionTokens = 0;
+  let usageIsReal = false;
+  const startTime = performance.now();
 
   const body = { messages: history, stream: true };
   const model = modelField.value.trim();
@@ -549,6 +562,16 @@ async function submit() {
           continue;
         }
 
+        // Some backends (confirmed: real OpenAI API, LM Studio) send a
+        // final usage-only chunk when stream_options.include_usage is
+        // requested (model.py always requests it). A tool-call round trip
+        // means multiple such chunks can arrive in one response - sum them
+        // for the total generation across every round.
+        if (chunk.usage && typeof chunk.usage.completion_tokens === 'number') {
+          completionTokens += chunk.usage.completion_tokens;
+          usageIsReal = true;
+        }
+
         const choice = (chunk.choices || [])[0] || {};
         const delta = choice.delta || {};
 
@@ -591,6 +614,16 @@ async function submit() {
     }
     if (reasoningText) {
       addReasoningToggle(assistantWrapper, reasoningText);
+    }
+    if (gotContent) {
+      const elapsedSeconds = (performance.now() - startTime) / 1000;
+      // Fall back to a rough chars-per-token estimate when the backend
+      // didn't report real usage, so the UI still shows something rather
+      // than nothing.
+      const tokens = usageIsReal ? completionTokens : Math.max(1, Math.round(assistantText.length / 4));
+      if (elapsedSeconds > 0) {
+        addStatsLine(assistantWrapper, tokens / elapsedSeconds, usageIsReal);
+      }
     }
     saveCurrentConversation();
     controller = null;
