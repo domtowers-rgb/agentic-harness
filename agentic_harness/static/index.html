@@ -53,9 +53,22 @@
   .msg.user { align-self: flex-end; background: var(--bubble-user); color: var(--bubble-user-fg); }
   .msg.assistant { align-self: flex-start; background: var(--bubble-assistant); color: var(--bubble-assistant-fg); }
   .msg.tool { align-self: flex-start; background: var(--tool-bg); color: var(--tool); font-size: 0.8rem; font-style: italic; padding: 0.35rem 0.7rem; }
-  .msg.reasoning { align-self: flex-start; background: transparent; color: var(--muted); font-size: 0.78rem; font-style: italic; padding: 0 0.1rem; }
   .msg.error { align-self: flex-start; background: #fdecea; color: #b3261e; }
   .msg.pending { min-width: 2.6rem; min-height: 1.1rem; display: flex; align-items: center; }
+  .turn { position: relative; align-self: flex-start; width: fit-content; max-width: 42rem; }
+  .reasoning-toggle {
+    position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+    font-size: 11px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .reasoning-toggle:hover { color: var(--fg); border-color: var(--fg); }
+  .reasoning-panel {
+    margin-top: 0.35rem; padding: 0.5rem 0.7rem; border-radius: 8px;
+    border: 1px dashed var(--border); color: var(--muted);
+    font-size: 0.78rem; font-style: italic; white-space: pre-wrap; word-wrap: break-word;
+  }
+  .reasoning-panel.hidden { display: none; }
   .dots { display: inline-flex; gap: 4px; }
   .dots span {
     width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.25;
@@ -202,6 +215,35 @@ function addBubble(role, text) {
   return el;
 }
 
+function addAssistantTurn() {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'turn';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg assistant';
+  wrapper.appendChild(bubble);
+  log.appendChild(wrapper);
+  log.scrollTop = log.scrollHeight;
+  return { wrapper, bubble };
+}
+
+function addReasoningToggle(wrapper, reasoningText) {
+  const toggle = document.createElement('button');
+  toggle.className = 'reasoning-toggle';
+  toggle.title = 'Show reasoning';
+  toggle.textContent = '🧠';
+
+  const panel = document.createElement('div');
+  panel.className = 'reasoning-panel hidden';
+  panel.textContent = reasoningText;
+
+  toggle.addEventListener('click', () => {
+    panel.classList.toggle('hidden');
+  });
+
+  wrapper.appendChild(toggle);
+  wrapper.appendChild(panel);
+}
+
 function setTyping(el, on) {
   el.classList.toggle('pending', on);
   if (on) {
@@ -244,12 +286,11 @@ async function submit() {
   input.value = '';
   setBusy(true);
 
-  const assistantEl = addBubble('assistant', '');
+  const { wrapper: assistantWrapper, bubble: assistantEl } = addAssistantTurn();
   setTyping(assistantEl, true);
   let assistantText = '';
   let gotContent = false;
   let toolEl = null;
-  let reasoningEl = null;
   let reasoningText = '';
 
   const body = { messages: history, stream: true };
@@ -302,11 +343,8 @@ async function submit() {
         const delta = choice.delta || {};
 
         if (delta.reasoning_content) {
+          // kept hidden by default - surfaced via the reasoning-toggle icon once the turn finishes
           reasoningText += delta.reasoning_content;
-          if (!reasoningEl) reasoningEl = addBubble('reasoning', '');
-          const preview = reasoningText.length > 240 ? '…' + reasoningText.slice(-240) : reasoningText;
-          reasoningEl.textContent = 'thinking: ' + preview;
-          log.scrollTop = log.scrollHeight;
         }
 
         if (delta.tool_calls) {
@@ -314,8 +352,6 @@ async function submit() {
             const name = tc.function && tc.function.name;
             if (name && !toolEl) {
               toolEl = addBubble('tool', 'using tool: ' + name);
-              reasoningEl = null;
-              reasoningText = '';
             }
           }
         }
@@ -342,6 +378,9 @@ async function submit() {
     if (!gotContent) {
       setTyping(assistantEl, false);
       assistantEl.textContent = assistantText || '(no content in response)';
+    }
+    if (reasoningText) {
+      addReasoningToggle(assistantWrapper, reasoningText);
     }
     controller = null;
     setBusy(false);
