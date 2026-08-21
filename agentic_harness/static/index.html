@@ -32,11 +32,34 @@
   }
   #sidebar.collapsed { display: none; }
   #sidebar h1 { font-size: 0.95rem; font-weight: 600; margin: 0; }
+  .sidebar-top-row { display: flex; gap: 0.5rem; }
   .new-chat-btn {
-    font-size: 0.85rem; font-weight: 600; padding: 0.5rem 0.7rem; border-radius: 8px; border: none;
+    flex: 1; font-size: 0.85rem; font-weight: 600; padding: 0.5rem 0.7rem; border-radius: 8px; border: none;
     background: var(--bubble-user); color: var(--bubble-user-fg); cursor: pointer; text-align: left;
   }
   .new-chat-btn:hover { opacity: 0.9; }
+  .icon-btn {
+    font-size: 0.95rem; width: 36px; height: 36px; flex-shrink: 0; padding: 0;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .icon-btn:hover { background: var(--bubble-assistant); }
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  .overlay.hidden { display: none; }
+  .modal {
+    width: 320px; max-height: 80vh; overflow-y: auto; padding: 1rem;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  }
+  .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7rem; }
+  .modal-header h2 { font-size: 0.95rem; margin: 0; }
+  .plugin-list { display: flex; flex-direction: column; gap: 0.55rem; }
+  .plugin-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer; }
+  .plugin-row input { cursor: pointer; }
+  .modal .hint { margin: 0.85rem 0 0; padding: 0; }
   .sidebar-section { display: flex; flex-direction: column; gap: 0.4rem; }
   .field-label {
     font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
@@ -115,7 +138,10 @@
 <body>
   <aside id="sidebar">
     <h1>Agentic LLM Harness</h1>
-    <button id="newChat" class="new-chat-btn">+ New chat</button>
+    <div class="sidebar-top-row">
+      <button id="newChat" class="new-chat-btn">+ New chat</button>
+      <button id="settingsBtn" class="icon-btn" title="Plugin settings">⚙</button>
+    </div>
     <div class="sidebar-section">
       <label class="field-label" for="endpoint">API endpoint</label>
       <input id="endpoint" type="text" placeholder="http://127.0.0.1:1234/v1">
@@ -129,6 +155,16 @@
       </select>
     </div>
   </aside>
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Plugins</h2>
+        <button id="settingsClose" class="icon-btn" title="Close">✕</button>
+      </div>
+      <div id="pluginList" class="plugin-list"></div>
+      <div class="hint">Changes apply the next time you start a new chat.</div>
+    </div>
+  </div>
   <div class="main-panel">
     <div class="topbar">
       <button id="sidebarToggle" title="Toggle sidebar">☰</button>
@@ -152,6 +188,10 @@ const connectBtn = document.getElementById('connect');
 const connStatus = document.getElementById('connStatus');
 const sidebar = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebarToggle');
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const settingsClose = document.getElementById('settingsClose');
+const pluginListEl = document.getElementById('pluginList');
 
 sidebarToggle.addEventListener('click', () => {
   sidebar.classList.toggle('collapsed');
@@ -159,6 +199,82 @@ sidebarToggle.addEventListener('click', () => {
 
 let history = [];
 let controller = null;
+
+// allPlugins: every plugin the server has loaded.
+// pendingEnabled: what the settings checkboxes currently show (persisted to localStorage).
+// activeEnabled: what's actually sent with requests for the current conversation -
+//   only adopts pendingEnabled's value when a new chat starts, so toggling a
+//   plugin mid-conversation doesn't change the tool set the model has already
+//   been seeing (which would defrag any prompt-prefix caching the backend does).
+let allPlugins = [];
+let pendingEnabled = new Set();
+let activeEnabled = new Set();
+
+function loadEnabledFromStorage(names) {
+  try {
+    const saved = JSON.parse(localStorage.getItem('enabledPlugins') || 'null');
+    if (Array.isArray(saved)) {
+      return new Set(names.filter((n) => saved.includes(n)));
+    }
+  } catch {
+    // ignore malformed storage - fall through to "all enabled"
+  }
+  return new Set(names);
+}
+
+function renderPluginList() {
+  pluginListEl.innerHTML = '';
+  for (const p of allPlugins) {
+    const row = document.createElement('label');
+    row.className = 'plugin-row';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = pendingEnabled.has(p.name);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        pendingEnabled.add(p.name);
+      } else {
+        pendingEnabled.delete(p.name);
+      }
+      localStorage.setItem('enabledPlugins', JSON.stringify([...pendingEnabled]));
+    });
+
+    const label = document.createElement('span');
+    label.textContent = p.name;
+    label.title = p.description || '';
+
+    row.appendChild(checkbox);
+    row.appendChild(label);
+    pluginListEl.appendChild(row);
+  }
+}
+
+async function loadPlugins() {
+  try {
+    const resp = await fetch('/v1/plugins');
+    if (!resp.ok) return;
+    const body = await resp.json();
+    allPlugins = body.plugins || [];
+    pendingEnabled = loadEnabledFromStorage(allPlugins.map((p) => p.name));
+    activeEnabled = new Set(pendingEnabled);
+    renderPluginList();
+  } catch {
+    // plugin settings simply won't be available - the server will still
+    // default to enabling everything since enabled_plugins is omitted
+  }
+}
+loadPlugins();
+
+settingsBtn.addEventListener('click', () => {
+  settingsOverlay.classList.remove('hidden');
+});
+settingsClose.addEventListener('click', () => {
+  settingsOverlay.classList.add('hidden');
+});
+settingsOverlay.addEventListener('click', (e) => {
+  if (e.target === settingsOverlay) settingsOverlay.classList.add('hidden');
+});
 
 async function loadModels() {
   try {
@@ -293,6 +409,7 @@ newChatBtn.addEventListener('click', () => {
   }
   history = [];
   log.innerHTML = '';
+  activeEnabled = new Set(pendingEnabled);
 });
 
 sendBtn.addEventListener('click', () => {
@@ -329,6 +446,12 @@ async function submit() {
   const body = { messages: history, stream: true };
   const model = modelField.value.trim();
   if (model) body.model = model;
+  // Only pin down enabled_plugins once we've actually loaded the plugin list -
+  // otherwise an empty set here would look like "disable everything" to the
+  // server, rather than the intended "no preference, use the default".
+  if (allPlugins.length) {
+    body.enabled_plugins = [...activeEnabled];
+  }
 
   controller = new AbortController();
   try {

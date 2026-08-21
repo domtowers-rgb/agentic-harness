@@ -26,6 +26,12 @@ else:
     CURRENT_BASE_URL = ""
 
 
+# Built once from the plugin registry, which is only populated at startup
+# (plugins are never hot-reloaded), so this never needs to be recomputed
+# per-request.
+_PLUGIN_TOOLS = [{"type": "function", "function": spec} for spec in plugins.registry.all_specs()]
+
+
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
     # very simple heuristic: assume 4 chars per token
     allowed_chars = max_tokens * 4
@@ -104,6 +110,16 @@ async def list_models():
     return JSONResponse(content={"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
 
 
+@app.get("/v1/plugins")
+async def list_plugins():
+    return JSONResponse(content={
+        "plugins": [
+            {"name": t["function"]["name"], "description": t["function"].get("description", "")}
+            for t in _PLUGIN_TOOLS
+        ]
+    })
+
+
 @app.get("/v1/status")
 async def status():
     return JSONResponse(content={"backend": MODEL_BACKEND, "base_url": CURRENT_BASE_URL})
@@ -134,11 +150,25 @@ async def connect(request: Request):
 async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages") or []
-    tools = body.get("tools")
+    tools = list(body.get("tools") or [])
     stream = body.get("stream", False)
     model_name = body.get("model")
     temperature = body.get("temperature", 0.0)
     max_tokens = body.get("max_tokens", 512)
+
+    # Merge in registered plugins as tools, skipping any name the client
+    # already supplied explicitly. enabled_plugins, if given, restricts this
+    # to that subset of plugin names (used by the web UI's plugin toggles);
+    # omitting it means "all loaded plugins".
+    enabled_plugins = body.get("enabled_plugins")
+    existing_names = {t.get("function", {}).get("name") for t in tools}
+    for tool in _PLUGIN_TOOLS:
+        name = tool["function"]["name"]
+        if name in existing_names:
+            continue
+        if enabled_plugins is not None and name not in enabled_plugins:
+            continue
+        tools.append(tool)
 
     # token-frugal trimming
     messages = _truncate_messages(messages, max_tokens=2048)
