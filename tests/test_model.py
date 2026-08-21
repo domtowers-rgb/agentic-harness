@@ -36,14 +36,6 @@ def test_mock_chat_stream_yields_content_then_stop():
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
 
-def test_mock_chat_stream_final_chunk_includes_usage():
-    m = model.MockModel()
-    chunks = list(m.chat_stream([{"role": "user", "content": "a b c"}]))
-    usage = chunks[-1]["usage"]
-    assert usage["completion_tokens"] == len("Echo: a b c".split())
-    assert usage["total_tokens"] == usage["completion_tokens"]
-
-
 def test_mock_chat_stream_tool_call():
     m = model.MockModel()
     chunks = list(
@@ -116,20 +108,3 @@ def test_openai_model_omits_max_tokens_when_not_given(monkeypatch):
 def test_openai_model_uses_custom_base_url(monkeypatch):
     m = model.OpenAIModel(api_key="k", base_url="http://127.0.0.1:9999/v1")
     assert str(m._client.base_url).rstrip("/") == "http://127.0.0.1:9999/v1"
-
-
-def test_openai_model_requests_usage_in_stream(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    m = model.OpenAIModel()
-    captured = {}
-
-    def fake_create(**kwargs):
-        captured.update(kwargs)
-        raise RuntimeError("stop-before-network")
-
-    m._client.chat.completions.create = fake_create
-    try:
-        list(m.chat_stream(messages=[{"role": "user", "content": "hi"}]))
-    except RuntimeError:
-        pass
-    assert captured["stream_options"] == {"include_usage": True}

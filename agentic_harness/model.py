@@ -49,12 +49,6 @@ class OpenAIModel(BaseModel):
             "model": kwargs.get("model") or DEFAULT_MODEL,
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.0),
-            # Ask for a final usage-only chunk (empty choices, populated
-            # usage) so callers can compute real tokens/sec instead of
-            # guessing from response length. Widely supported (confirmed
-            # against the real OpenAI API and LM Studio); a backend that
-            # doesn't recognize it should just ignore the field.
-            "stream_options": {"include_usage": True},
         }
         if kwargs.get("max_tokens") is not None:
             params["max_tokens"] = kwargs["max_tokens"]
@@ -119,11 +113,8 @@ class MockModel(BaseModel):
         for i, p in enumerate(parts):
             delta = {"choices": [{"delta": {"content": (p + (" " if i < len(parts)-1 else ""))}}], "object": "chat.completion.chunk"}
             yield delta
-        # final full message, with a fabricated but consistent usage count
-        # (mirrors real backends' final usage-only chunk) so callers can
-        # exercise the real tokens/sec path against the mock backend too.
-        usage = {"completion_tokens": len(parts), "prompt_tokens": 0, "total_tokens": len(parts)}
-        final = {"id": "mock-1", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}], "usage": usage}
+        # final full message
+        final = {"id": "mock-1", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}], "usage": {}}
         yield final
 
     def list_models(self) -> List[str]:

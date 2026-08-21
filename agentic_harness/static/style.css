@@ -133,7 +133,6 @@ main {
   font-size: 0.78rem; font-style: italic; white-space: pre-wrap; word-wrap: break-word;
 }
 .reasoning-panel.hidden { display: none; }
-.turn-stats { margin-top: 0.25rem; padding: 0 0.2rem; font-size: 0.7rem; color: var(--muted); }
 .dots { display: inline-flex; gap: 4px; }
 .dots span {
   width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.25;
