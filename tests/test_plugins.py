@@ -80,9 +80,21 @@ class TestFileOps:
         result = self.file_ops.list_files("nope")
         assert "error" in result
 
-    @pytest.mark.parametrize("path", ["../../../etc/passwd", "/etc/passwd", "..\\..\\secret.txt"])
+    @pytest.mark.parametrize("path", ["../../../etc/passwd", "/etc/passwd"])
     def test_path_escape_rejected(self, path):
+        # These use "/" as the separator, so they're meaningful traversal
+        # attempts on every platform.
         result = self.file_ops.read_file(path)
+        assert "error" in result
+        assert "sandbox" in result["error"]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="backslash is only a path separator on Windows")
+    def test_windows_backslash_escape_rejected(self):
+        # On POSIX this string is just an inert literal filename (backslash
+        # isn't a separator there), so it correctly stays inside the sandbox
+        # and hits "no such file" instead - not a security gap, just not a
+        # meaningful traversal attempt on that platform.
+        result = self.file_ops.read_file("..\\..\\secret.txt")
         assert "error" in result
         assert "sandbox" in result["error"]
 
