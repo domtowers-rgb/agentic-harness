@@ -1,6 +1,6 @@
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -8,16 +8,28 @@ MAX_CHARS = 20_000
 TIMEOUT_SECONDS = 10.0
 
 
-def _is_safe_host(hostname: str) -> bool:
+def _resolve_pinned_ip(hostname: str):
+    """Resolve hostname and return one validated IP literal to connect to
+    directly, or None if resolution failed or any resolved address is
+    private/internal.
+
+    We deliberately connect to this pinned IP instead of handing the
+    hostname to the HTTP client. If we didn't, the client would do its own,
+    separate DNS resolution at connect time - a gap an attacker-controlled
+    DNS server can exploit (DNS rebinding) by answering this check with a
+    public IP and the real connection moments later with an internal one.
+    """
     try:
         infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return False
+        return None
+    ips = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False
-    return True
+            return None
+        ips.append(info[4][0])
+    return ips[0] if ips else None
 
 
 def fetch_url(url: str):
@@ -27,16 +39,30 @@ def fetch_url(url: str):
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return {"error": "only http/https URLs are allowed"}
-    if not parsed.hostname or not _is_safe_host(parsed.hostname):
+    if not parsed.hostname:
+        return {"error": "URL has no hostname"}
+
+    pinned_ip = _resolve_pinned_ip(parsed.hostname)
+    if pinned_ip is None:
         return {"error": "refusing to fetch a private, loopback, or internal address"}
 
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    netloc = f"[{pinned_ip}]:{port}" if ":" in pinned_ip else f"{pinned_ip}:{port}"
+    pinned_url = urlunparse(parsed._replace(netloc=netloc))
+
     try:
-        resp = httpx.get(
-            url,
-            timeout=TIMEOUT_SECONDS,
-            follow_redirects=False,
-            headers={"User-Agent": "agentic-harness/0.1"},
-        )
+        with httpx.Client(timeout=TIMEOUT_SECONDS, follow_redirects=False) as client:
+            # Host header set explicitly (rather than derived from the
+            # pinned-IP URL) preserves virtual-hosting; sni_hostname keeps
+            # TLS SNI and certificate-hostname checks validating against the
+            # real domain instead of the IP.
+            request = client.build_request(
+                "GET",
+                pinned_url,
+                headers={"User-Agent": "agentic-harness/0.1", "Host": parsed.hostname},
+                extensions={"sni_hostname": parsed.hostname},
+            )
+            resp = client.send(request)
     except Exception as exc:
         return {"error": f"request failed: {exc}"}
 
