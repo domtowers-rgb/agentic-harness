@@ -67,6 +67,7 @@ Built-in plugins:
 - `fetch_url` - fetch a public http(s) URL's text. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection).
 - `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY`; without it, the tool reports a clear error instead of failing silently.
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
+- `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it.
 - `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
 
 Additional environment variables used by the built-in plugins:

@@ -104,6 +104,73 @@ class TestFileOps:
         assert "error" in result
 
 
+class TestPowerpoint:
+    @pytest.fixture(autouse=True)
+    def _sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTIC_FILES_DIR", str(tmp_path))
+        import plugins.file_ops as file_ops
+        importlib.reload(file_ops)
+        import plugins.powerpoint as powerpoint
+        importlib.reload(powerpoint)
+        self.powerpoint = powerpoint
+        self.tmp_path = tmp_path
+        yield
+
+    def test_creates_a_real_pptx_with_correct_content(self):
+        from pptx import Presentation
+
+        result = self.powerpoint.create_presentation(
+            title="Test Deck",
+            subtitle="A subtitle",
+            slides=[{"title": "Slide One", "bullets": ["first", "second"]}],
+        )
+        assert result["status"] == "written"
+        assert result["slide_count"] == 2
+
+        prs = Presentation(str(self.tmp_path / result["path"]))
+        slides = list(prs.slides)
+        assert len(slides) == 2
+        assert slides[0].shapes.title.text == "Test Deck"
+        assert slides[0].placeholders[1].text_frame.text == "A subtitle"
+        assert slides[1].shapes.title.text == "Slide One"
+        body_text = [p.text for p in slides[1].placeholders[1].text_frame.paragraphs]
+        assert body_text == ["first", "second"]
+
+    def test_slide_without_bullets_is_fine(self):
+        result = self.powerpoint.create_presentation(title="X", slides=[{"title": "Empty"}])
+        assert result["status"] == "written"
+
+    def test_filename_defaults_to_sanitized_title(self):
+        result = self.powerpoint.create_presentation(title="My Cool Deck!!", slides=[])
+        assert result["path"] == "My_Cool_Deck.pptx"
+
+    def test_missing_title_rejected(self):
+        assert "error" in self.powerpoint.create_presentation(title="", slides=[])
+
+    def test_slides_must_be_a_list(self):
+        assert "error" in self.powerpoint.create_presentation(title="X", slides="nope")
+
+    def test_slide_entry_must_be_a_dict(self):
+        assert "error" in self.powerpoint.create_presentation(title="X", slides=["nope"])
+
+    def test_too_many_slides_rejected(self):
+        many = [{"title": f"s{i}"} for i in range(self.powerpoint.MAX_SLIDES + 1)]
+        assert "error" in self.powerpoint.create_presentation(title="X", slides=many)
+
+    def test_too_many_bullets_rejected(self):
+        bullets = [str(i) for i in range(self.powerpoint.MAX_BULLETS_PER_SLIDE + 1)]
+        result = self.powerpoint.create_presentation(title="X", slides=[{"title": "s", "bullets": bullets}])
+        assert "error" in result
+
+    def test_filename_cannot_escape_sandbox(self):
+        result = self.powerpoint.create_presentation(title="X", slides=[], filename="../../evil")
+        # sanitization strips path separators before the sandbox check even
+        # runs, so this lands safely inside the sandbox rather than erroring -
+        # confirm it did NOT escape.
+        assert result["status"] == "written"
+        assert (self.tmp_path / result["path"]).resolve().parent == self.tmp_path.resolve()
+
+
 class TestFetchUrl:
     def test_rejects_bad_scheme(self):
         from plugins.fetch_url import fetch_url
