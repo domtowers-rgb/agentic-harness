@@ -256,4 +256,11 @@ app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "st
 
 
 if __name__ == "__main__":
-    uvicorn.run("agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=True)
+    # Off by default: uvicorn's --reload respawns a worker subprocess, and on
+    # at least one real Windows setup that respawn silently used the base
+    # interpreter instead of an active venv's - meaning any venv-installed
+    # dependency (a plugin's, say) would just vanish with no error. Opt in
+    # with AGENTIC_RELOAD=1 for active development, and watch for that
+    # failure mode if you do (plugins.py logs a load failure if it happens).
+    reload = os.environ.get("AGENTIC_RELOAD") == "1"
+    uvicorn.run("agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=reload)
