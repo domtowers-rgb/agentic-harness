@@ -38,6 +38,10 @@ def load_plugins(path: str = None):
             module = importlib.import_module(full_name)
             if hasattr(module, "register"):
                 module.register(registry)
-        except Exception:
-            # keep loader minimal and tolerant
+        except Exception as exc:
+            # Keep the loader tolerant - one broken plugin (e.g. a missing
+            # dependency) shouldn't take down the whole server - but never
+            # silent. A swallowed exception here previously meant a plugin
+            # could vanish with zero indication anywhere why.
+            print(f"[plugins] failed to load '{full_name}': {exc}")
             continue

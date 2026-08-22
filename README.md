@@ -58,6 +58,8 @@ Plugins
 
 Plugins live in the `plugins/` folder. Each module should expose a `register(registry)` function that calls `registry.register(name, callable, spec)`.
 
+If a plugin fails to import (most commonly: you pulled a change that added a new dependency, like `python-pptx` for `create_presentation`, without re-running `pip install -r requirements.txt`), it's skipped rather than crashing the server - but not silently: the server logs `[plugins] failed to load '...': ...` at startup, and it just won't show up in `/v1/plugins` or the settings dialog. If a plugin you expect is missing, check the server's startup log for that line first.
+
 By default, every loaded plugin is automatically added to the `tools` sent on each `/v1/chat/completions` request (merged in behind any `tools` the client already supplied, without duplicating names). `GET /v1/plugins` lists what's loaded. To use only a subset for one request, pass `"enabled_plugins": ["calculate", "get_current_time"]` in the request body - the web UI's settings (⚙) panel does this for you, with per-plugin checkboxes persisted in the browser. Changes there only take effect on the next "New chat", by design: keeping the tool list stable within a conversation lets a local inference server's own prompt-prefix caching actually help.
 
 Built-in plugins:
