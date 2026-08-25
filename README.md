@@ -44,6 +44,7 @@ Environment
 - `AGENTIC_DEFAULT_MODEL`: model name used when a request omits `model` (default `gpt-4o-mini`). Set this to your loaded local model's id when using a local server.
 - `AGENTIC_MAX_TOOL_ITERATIONS`: cap on tool-call round trips per request before giving up (default `8`).
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
+- `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `personality.txt`). Its content is prepended as a system message on every request that doesn't already supply its own - your own system message always wins over it. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `personality.txt` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
 
 Using a local model (e.g. LM Studio, Ollama, llama.cpp server)
 

@@ -31,6 +31,30 @@ else:
 # per-request.
 _PLUGIN_TOOLS = [{"type": "function", "function": spec} for spec in plugins.registry.all_specs()]
 
+PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "personality.txt")
+PERSONALITY_MAX_TOKENS = 100
+
+
+def _load_personality(path: str) -> str:
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read().strip()
+    if not text:
+        return ""
+    # Same rough ~4-chars/token heuristic used elsewhere in this file - not
+    # exact, but enough to flag "this is probably way over the intended size".
+    estimated_tokens = len(text) / 4
+    if estimated_tokens > PERSONALITY_MAX_TOKENS:
+        print(
+            f"[personality] {path} is ~{estimated_tokens:.0f} tokens (estimated), "
+            f"over the {PERSONALITY_MAX_TOKENS}-token guideline - consider trimming it. Using it as-is."
+        )
+    return text
+
+
+PERSONALITY = _load_personality(PERSONALITY_FILE)
+
 
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
     # very simple heuristic: assume 4 chars per token
@@ -172,6 +196,13 @@ async def chat_completions(request: Request):
 
     # token-frugal trimming
     messages = _truncate_messages(messages, max_tokens=2048)
+
+    # Personality system prompt: a small, fixed addition on top of the
+    # (already-trimmed) conversation budget, so it's never at risk of being
+    # trimmed away itself. Only added if the caller didn't already supply
+    # their own system message - theirs wins if given.
+    if PERSONALITY and not (messages and messages[0].get("role") == "system"):
+        messages = [{"role": "system", "content": PERSONALITY}] + messages
 
     if stream:
         async def event_stream():

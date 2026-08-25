@@ -212,6 +212,85 @@ def test_client_supplied_tool_not_duplicated(client, monkeypatch):
     assert calculate_tools[0]["function"]["description"] == "custom override"
 
 
+def test_personality_prepended_when_client_supplies_no_system_message(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["messages"] = messages
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    monkeypatch.setattr(main_mod, "PERSONALITY", "Be concise and friendly.")
+
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    assert captured["messages"][0] == {"role": "system", "content": "Be concise and friendly."}
+    assert captured["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_personality_not_prepended_when_client_supplies_own_system_message(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["messages"] = messages
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    monkeypatch.setattr(main_mod, "PERSONALITY", "Be concise and friendly.")
+
+    client.post("/v1/chat/completions", json={
+        "messages": [
+            {"role": "system", "content": "Custom system prompt."},
+            {"role": "user", "content": "hi"},
+        ],
+    })
+
+    assert captured["messages"][0] == {"role": "system", "content": "Custom system prompt."}
+    assert len(captured["messages"]) == 2
+
+
+def test_no_personality_configured_leaves_messages_untouched(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["messages"] = messages
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    monkeypatch.setattr(main_mod, "PERSONALITY", "")
+
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+    assert captured["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_load_personality_returns_empty_for_missing_file():
+    assert main_mod._load_personality("this/file/does/not/exist.txt") == ""
+
+
+def test_load_personality_strips_whitespace(tmp_path):
+    path = tmp_path / "personality.txt"
+    path.write_text("  Be nice.  \n", encoding="utf-8")
+    assert main_mod._load_personality(str(path)) == "Be nice."
+
+
+def test_load_personality_warns_when_over_token_guideline(tmp_path, capsys):
+    path = tmp_path / "personality.txt"
+    path.write_text("x" * 1000, encoding="utf-8")  # ~250 estimated tokens, over the 100 guideline
+    main_mod._load_personality(str(path))
+    assert "over the 100-token guideline" in capsys.readouterr().out
+
+
+def test_load_personality_no_warning_when_within_guideline(tmp_path, capsys):
+    path = tmp_path / "personality.txt"
+    path.write_text("Be nice.", encoding="utf-8")
+    main_mod._load_personality(str(path))
+    assert capsys.readouterr().out == ""
+
+
 def test_truncate_messages_drops_oldest_when_over_budget():
     from agentic_harness.main import _truncate_messages
     messages = [{"role": "user", "content": "x" * 1000} for _ in range(50)]
