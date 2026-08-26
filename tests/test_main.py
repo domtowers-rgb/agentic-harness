@@ -291,6 +291,66 @@ def test_load_personality_no_warning_when_within_guideline(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_max_tokens_defaults_when_omitted(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["max_tokens"] = kwargs.get("max_tokens")
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert captured["max_tokens"] == main_mod.DEFAULT_MAX_TOKENS
+
+
+def test_max_tokens_falls_back_to_default_on_explicit_null(client, monkeypatch):
+    # A client-sent "max_tokens": null must not slip through as None - that
+    # would omit the cap entirely downstream (model.py only forwards
+    # max_tokens when it's not None), reproducing the original
+    # runaway-generation bug this default exists to prevent.
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["max_tokens"] = kwargs.get("max_tokens")
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": None})
+    assert captured["max_tokens"] == main_mod.DEFAULT_MAX_TOKENS
+
+
+def test_max_tokens_explicit_value_is_respected(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["max_tokens"] = kwargs.get("max_tokens")
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 77})
+    assert captured["max_tokens"] == 77
+
+
+def test_history_max_tokens_is_configurable(client, monkeypatch):
+    captured = {}
+
+    class SpyModel:
+        def chat(self, messages, tools=None, **kwargs):
+            captured["messages"] = messages
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", SpyModel())
+    monkeypatch.setattr(main_mod, "HISTORY_MAX_TOKENS", 1)  # ~4 chars of budget - forces heavy trimming
+    monkeypatch.setattr(main_mod, "PERSONALITY", "")  # isolate from the personality prepend
+
+    long_history = [{"role": "user", "content": "x" * 100} for _ in range(20)]
+    client.post("/v1/chat/completions", json={"messages": long_history})
+    assert len(captured["messages"]) < len(long_history)
+
+
 def test_truncate_messages_drops_oldest_when_over_budget():
     from agentic_harness.main import _truncate_messages
     messages = [{"role": "user", "content": "x" * 1000} for _ in range(50)]

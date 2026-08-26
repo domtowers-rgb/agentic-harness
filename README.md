@@ -43,6 +43,8 @@ Environment
 - `OPENAI_BASE_URL`: point at a local OpenAI-compatible server (e.g. `http://127.0.0.1:1234/v1` for LM Studio, `http://127.0.0.1:11434/v1` for Ollama). Omit to use the real OpenAI API. Can also be set at runtime from the web UI's settings (⚙) panel (API endpoint field + Connect button), without restarting the server.
 - `AGENTIC_DEFAULT_MODEL`: model name used when a request omits `model` (default `gpt-4o-mini`). Set this to your loaded local model's id when using a local server.
 - `AGENTIC_MAX_TOOL_ITERATIONS`: cap on tool-call round trips per request before giving up (default `8`).
+- `AGENTIC_DEFAULT_MAX_TOKENS`: `max_tokens` used when a request omits it - the web UI always omits it (default `2048`, was previously a hardcoded `512`). Matters a lot for local "thinking" models: too low and the model can burn its whole budget on `reasoning_content` and get cut off before producing any real answer - every token generated toward a response that never completes is pure wasted decode time, not saved time.
+- `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep, in the same rough chars/4 heuristic `_truncate_messages` uses (default `2048`). Tune this to roughly match your local model's actual configured context window.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `personality.txt`). Its content is prepended as a system message on every request that doesn't already supply its own - your own system message always wins over it. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `personality.txt` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
 
@@ -88,3 +90,12 @@ pytest
 ```
 
 Runs on push/PR via GitHub Actions (`.github/workflows/tests.yml`). A couple of `fetch_url` tests hit a real public URL (`example.com`) and skip themselves if the network is unavailable rather than failing.
+
+Performance with local models
+
+The biggest lever for local model speed - quantization, GPU layer offload, context size - lives in the model server (LM Studio, Ollama, llama.cpp), not this harness. What the harness does control:
+
+- **Prompt-prefix reuse**: conversation history is append-only and `enabled_plugins` stays fixed for a whole conversation, so the prompt sent each turn shares an identical prefix with the last one - this is what lets a local backend's own KV-cache reuse actually kick in (only the new tail gets reprocessed, not the whole conversation from scratch). Don't toggle plugins mid-conversation if you care about this.
+- **`AGENTIC_DEFAULT_MAX_TOKENS`**: see above - too low wastes decode time on responses that get cut off before finishing.
+- **`personality.txt`**: adding an instruction like "keep reasoning brief" measurably cuts `reasoning_content` token usage on models that do extended thinking - worth trying if your model over-analyzes simple requests.
+- **Trim your plugin set** in the settings (⚙) panel for everyday chat - every enabled plugin adds to the tool definitions sent on the first message of each conversation, whether or not you end up using it.

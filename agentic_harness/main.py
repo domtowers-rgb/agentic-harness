@@ -13,6 +13,18 @@ app = FastAPI(title="Agentic LLM Harness")
 
 MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "8"))
 
+# Used whenever a request doesn't specify its own max_tokens (the web UI
+# never does). Was hardcoded at 512, which is often not enough room for a
+# local "thinking" model to finish its reasoning and still produce an
+# answer - every token generated toward a response that then gets cut off
+# is wasted decode time, not saved time.
+DEFAULT_MAX_TOKENS = int(os.environ.get("AGENTIC_DEFAULT_MAX_TOKENS", "2048"))
+
+# How much of the conversation history to keep, in the same rough
+# chars-per-token heuristic _truncate_messages uses. Tune this to roughly
+# match your model's actual configured context window.
+HISTORY_MAX_TOKENS = int(os.environ.get("AGENTIC_HISTORY_MAX_TOKENS", "2048"))
+
 # load plugins at startup
 plugins.load_plugins()
 
@@ -178,7 +190,12 @@ async def chat_completions(request: Request):
     stream = body.get("stream", False)
     model_name = body.get("model")
     temperature = body.get("temperature", 0.0)
-    max_tokens = body.get("max_tokens", 512)
+    # `.get(..., DEFAULT_MAX_TOKENS)` alone wouldn't fall back if a client
+    # sent an explicit `"max_tokens": null` - that key would still be
+    # present, so .get() would return None rather than the default,
+    # reproducing the exact "no cap, runaway generation" bug this default
+    # exists to prevent in the first place.
+    max_tokens = body.get("max_tokens") or DEFAULT_MAX_TOKENS
 
     # Merge in registered plugins as tools, skipping any name the client
     # already supplied explicitly. enabled_plugins, if given, restricts this
@@ -195,7 +212,7 @@ async def chat_completions(request: Request):
         tools.append(tool)
 
     # token-frugal trimming
-    messages = _truncate_messages(messages, max_tokens=2048)
+    messages = _truncate_messages(messages, max_tokens=HISTORY_MAX_TOKENS)
 
     # Personality system prompt: a small, fixed addition on top of the
     # (already-trimmed) conversation budget, so it's never at risk of being
