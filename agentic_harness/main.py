@@ -44,7 +44,7 @@ else:
 # per-request.
 _PLUGIN_TOOLS = [{"type": "function", "function": spec} for spec in plugins.registry.all_specs()]
 
-PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "personality.txt")
+PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "SOUL.md")
 PERSONALITY_MAX_TOKENS = 100
 
 

@@ -272,20 +272,20 @@ def test_load_personality_returns_empty_for_missing_file():
 
 
 def test_load_personality_strips_whitespace(tmp_path):
-    path = tmp_path / "personality.txt"
+    path = tmp_path / "SOUL.md"
     path.write_text("  Be nice.  \n", encoding="utf-8")
     assert main_mod._load_personality(str(path)) == "Be nice."
 
 
 def test_load_personality_warns_when_over_token_guideline(tmp_path, capsys):
-    path = tmp_path / "personality.txt"
+    path = tmp_path / "SOUL.md"
     path.write_text("x" * 1000, encoding="utf-8")  # ~250 estimated tokens, over the 100 guideline
     main_mod._load_personality(str(path))
     assert "over the 100-token guideline" in capsys.readouterr().out
 
 
 def test_load_personality_no_warning_when_within_guideline(tmp_path, capsys):
-    path = tmp_path / "personality.txt"
+    path = tmp_path / "SOUL.md"
     path.write_text("Be nice.", encoding="utf-8")
     main_mod._load_personality(str(path))
     assert capsys.readouterr().out == ""
