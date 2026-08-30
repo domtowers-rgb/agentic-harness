@@ -351,6 +351,76 @@ def test_history_max_tokens_is_configurable(client, monkeypatch):
     assert len(captured["messages"]) < len(long_history)
 
 
+def test_audit_log_records_successful_tool_call(client, monkeypatch, tmp_path):
+    log_path = tmp_path / "audit.log"
+    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(log_path))
+
+    class ToolModel:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, tools=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": "call_1", "type": "function",
+                                     "function": {"name": "hello", "arguments": '{"name": "Dave"}'}}],
+                }}]}
+            return {"choices": [{"message": {"role": "assistant", "content": "done"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", ToolModel())
+    client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "say hi"}],
+        "tools": [{"type": "function", "function": {"name": "hello"}}],
+    })
+
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["tool"] == "hello"
+    assert "Dave" in entry["args"]
+    assert "Hello" in entry["result"]
+    assert "timestamp" in entry
+
+
+def test_audit_log_records_unknown_tool_call(client, monkeypatch, tmp_path):
+    log_path = tmp_path / "audit.log"
+    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(log_path))
+
+    class BadToolModel:
+        def chat(self, messages, tools=None, **kwargs):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                                 "function": {"name": "does_not_exist", "arguments": "{}"}}],
+            }}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", BadToolModel())
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["tool"] == "does_not_exist"
+    assert "unknown function" in entry["result"]
+
+
+def test_audit_log_truncates_long_values():
+    result = main_mod._truncate_for_audit("x" * 1000)
+    assert len(result) < 1000
+    assert result.endswith("...(truncated)")
+
+
+def test_audit_log_short_values_not_truncated():
+    assert main_mod._truncate_for_audit("short") == "short"
+
+
+def test_audit_log_write_failure_does_not_raise(monkeypatch):
+    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", "this/path/does/not/exist/audit.log")
+    main_mod._audit_log("some_tool", {"a": 1}, {"ok": True})  # must not raise
+
+
 def test_truncate_messages_drops_oldest_when_over_budget():
     from agentic_harness.main import _truncate_messages
     messages = [{"role": "user", "content": "x" * 1000} for _ in range(50)]

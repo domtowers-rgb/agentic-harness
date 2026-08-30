@@ -7,6 +7,7 @@ import os
 import json
 import asyncio
 import queue
+from datetime import datetime, timezone
 from typing import List, Dict, Any, AsyncIterator, Iterator
 
 app = FastAPI(title="Agentic LLM Harness")
@@ -81,6 +82,37 @@ def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -
     return out
 
 
+# Local audit trail of every tool call: what was invoked, with what
+# arguments, and what came back. Not sent anywhere - stays on this machine,
+# same trust model as workspace/. Useful for both debugging ("why did it do
+# that?") and security review, since tool calls execute automatically with
+# no approval step.
+AUDIT_LOG_FILE = os.environ.get("AGENTIC_AUDIT_LOG", "audit.log")
+AUDIT_LOG_MAX_CHARS = 500
+
+
+def _truncate_for_audit(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    if len(text) > AUDIT_LOG_MAX_CHARS:
+        return text[:AUDIT_LOG_MAX_CHARS] + "...(truncated)"
+    return text
+
+
+def _audit_log(tool_name: str, args: Any, result: Any) -> None:
+    try:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tool": tool_name,
+            "args": _truncate_for_audit(args),
+            "result": _truncate_for_audit(result),
+        }
+        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        # Never let audit logging itself break a tool call.
+        print(f"[audit] failed to write audit log entry: {exc}")
+
+
 def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> str:
     """Execute tool_calls via the plugin registry, appending the assistant and
     tool-result messages to `messages` in place. Returns an error string if a
@@ -98,6 +130,7 @@ def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, A
 
         plugin = plugins.registry.get(fname)
         if not plugin:
+            _audit_log(fname, args, {"error": "unknown function"})
             return f"unknown function: {fname}"
 
         try:
@@ -105,6 +138,7 @@ def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, A
         except TypeError:
             result = plugin["callable"](args)
 
+        _audit_log(fname, args, result)
         messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result)})
 
     return None

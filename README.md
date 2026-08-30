@@ -47,6 +47,7 @@ Environment
 - `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep, in the same rough chars/4 heuristic `_truncate_messages` uses (default `2048`). Tune this to roughly match your local model's actual configured context window.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `personality.txt`). Its content is prepended as a system message on every request that doesn't already supply its own - your own system message always wins over it. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `personality.txt` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
+- `AGENTIC_AUDIT_LOG`: path to the tool-call audit log (default `audit.log`). See "Audit log" below.
 
 Using a local model (e.g. LM Studio, Ollama, llama.cpp server)
 
@@ -74,6 +75,7 @@ Built-in plugins:
 - `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY`; without it, the tool reports a clear error instead of failing silently.
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
 - `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it.
+- `remember` / `recall` / `forget` - a small persistent key-value notes store (in `memory.json` in the same sandboxed directory), so the model can save and retrieve small facts across separate conversations, not just within one.
 - `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
 
 Additional environment variables used by the built-in plugins:
@@ -81,6 +83,10 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_FILES_DIR`: sandbox directory for `read_file`/`write_file`/`list_files`/`run_command` (default `workspace/`).
 - `AGENTIC_ENABLE_SHELL`: set to `1` to enable `run_command`.
 - `BRAVE_API_KEY`: enables `web_search`.
+
+Audit log
+
+Every tool call (name, arguments, result - each truncated to 500 characters) is appended as one JSON line to `AGENTIC_AUDIT_LOG` (default `audit.log`), since tool calls execute automatically with no approval step. Local-only, never sent anywhere, same trust model as `workspace/` - but it does contain whatever the tools were called with, so treat it as sensitive.
 
 Tests
 

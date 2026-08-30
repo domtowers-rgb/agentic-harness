@@ -13,6 +13,15 @@ from fastapi.testclient import TestClient
 from agentic_harness import main as main_mod
 
 
+@pytest.fixture(autouse=True)
+def _isolate_audit_log(tmp_path, monkeypatch):
+    """Redirect the audit log to a throwaway path for every test, so tests
+    that exercise the tool-call loop (most of them) don't write into the
+    real project's audit.log as a side effect of running the suite. Tests
+    that specifically test audit logging override this themselves."""
+    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(tmp_path / "audit.log"))
+
+
 @pytest.fixture
 def client():
     """A TestClient against the real app, running whatever backend main.py

@@ -171,6 +171,65 @@ class TestPowerpoint:
         assert (self.tmp_path / result["path"]).resolve().parent == self.tmp_path.resolve()
 
 
+class TestMemory:
+    @pytest.fixture(autouse=True)
+    def _sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENTIC_FILES_DIR", str(tmp_path))
+        import plugins.file_ops as file_ops
+        importlib.reload(file_ops)
+        import plugins.memory as memory
+        importlib.reload(memory)
+        self.memory = memory
+        yield
+
+    def test_remember_then_recall(self):
+        result = self.memory.remember(key="favorite_color", value="teal")
+        assert result == {"status": "saved", "key": "favorite_color"}
+        assert self.memory.recall(key="favorite_color") == {"key": "favorite_color", "value": "teal"}
+
+    def test_recall_missing_key_errors(self):
+        result = self.memory.recall(key="nope")
+        assert "error" in result
+
+    def test_recall_with_no_key_lists_everything(self):
+        self.memory.remember(key="a", value="1")
+        self.memory.remember(key="b", value="2")
+        result = self.memory.recall()
+        assert result == {"memories": {"a": "1", "b": "2"}}
+
+    def test_forget_removes_key(self):
+        self.memory.remember(key="temp", value="x")
+        assert self.memory.forget(key="temp") == {"status": "forgotten", "key": "temp"}
+        assert "error" in self.memory.recall(key="temp")
+
+    def test_forget_missing_key_errors(self):
+        assert "error" in self.memory.forget(key="nope")
+
+    def test_missing_key_on_remember_rejected(self):
+        assert "error" in self.memory.remember(key="", value="x")
+
+    def test_value_too_large_rejected(self):
+        result = self.memory.remember(key="k", value="x" * (self.memory.MAX_VALUE_CHARS + 1))
+        assert "error" in result
+
+    def test_memory_full_rejects_new_keys_but_allows_updates(self, monkeypatch):
+        monkeypatch.setattr(self.memory, "MAX_ENTRIES", 2)
+        assert self.memory.remember(key="a", value="1")["status"] == "saved"
+        assert self.memory.remember(key="b", value="2")["status"] == "saved"
+        # updating an existing key when full is fine - it's not a new entry
+        assert self.memory.remember(key="a", value="1-updated")["status"] == "saved"
+        # a genuinely new key when full is rejected
+        assert "error" in self.memory.remember(key="c", value="3")
+
+    def test_persists_to_a_real_json_file(self, tmp_path):
+        self.memory.remember(key="k", value="v")
+        assert (tmp_path / "memory.json").is_file()
+        # a second "process" (fresh import) reads back what was saved
+        import importlib as _importlib
+        _importlib.reload(self.memory)
+        assert self.memory.recall(key="k") == {"key": "k", "value": "v"}
+
+
 class TestFetchUrl:
     def test_rejects_bad_scheme(self):
         from plugins.fetch_url import fetch_url
