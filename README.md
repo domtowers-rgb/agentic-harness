@@ -49,6 +49,20 @@ Environment
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is prepended as a system message on every request that doesn't already supply its own - your own system message always wins over it. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
 - `AGENTIC_AUDIT_LOG`: path to the tool-call audit log (default `audit.log`). See "Audit log" below.
 
+**If the requested model isn't loaded on the backend** (e.g. `AGENTIC_DEFAULT_MODEL` names a model that isn't actually running in LM Studio), `/v1/chat/completions` (non-streaming only) returns `404` with a machine-readable body instead of an opaque `500`:
+
+```json
+{"detail": {"type": "model_not_found", "model": "the-requested-name", "available_models": ["a", "b"]}}
+```
+
+This is what lets a client offer a fix instead of a dead end - see
+[agentic-gateway](https://github.com/domtowers-rgb/agentic-gateway), which
+asks the user (over Signal) to pick from `available_models` and retries
+automatically once they do. Any other backend failure (e.g. the server
+being unreachable at all) still comes back as a plain `502`. Not covered:
+the streaming path, whose errors surface inside an already-started SSE
+response - the web UI is the only caller of that path today.
+
 Using a local model (e.g. LM Studio, Ollama, llama.cpp server)
 
 ```bash

@@ -81,6 +81,71 @@ def test_unknown_tool_call_returns_400(client, monkeypatch):
     assert r.status_code == 400
 
 
+def test_missing_model_returns_a_machine_readable_404(client, monkeypatch):
+    class MissingModelModel:
+        def chat(self, messages, tools=None, **kwargs):
+            raise RuntimeError("404 - model 'ghost-model' not found")
+
+        def list_models(self, *args, **kwargs):
+            return ["real-model-a", "real-model-b"]
+
+    monkeypatch.setattr(main_mod, "model_impl", MissingModelModel())
+    monkeypatch.setattr(model, "DEFAULT_MODEL", "ghost-model")
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert detail == {
+        "type": "model_not_found",
+        "model": "ghost-model",
+        "available_models": ["real-model-a", "real-model-b"],
+    }
+
+
+def test_missing_model_uses_the_explicit_model_field_over_the_default(client, monkeypatch):
+    class MissingModelModel:
+        def chat(self, messages, tools=None, **kwargs):
+            raise RuntimeError("model not found")
+
+        def list_models(self, *args, **kwargs):
+            return ["real-model"]
+
+    monkeypatch.setattr(main_mod, "model_impl", MissingModelModel())
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "explicitly-requested-ghost",
+    })
+    assert r.status_code == 404
+    assert r.json()["detail"]["model"] == "explicitly-requested-ghost"
+
+
+def test_a_failure_that_is_not_a_missing_model_returns_a_plain_502(client, monkeypatch):
+    class DownModel:
+        def chat(self, messages, tools=None, **kwargs):
+            raise RuntimeError("connection refused")
+
+        def list_models(self, *args, **kwargs):
+            # The requested model *is* in the list - so a real, available
+            # model still failed for some other reason (backend down, etc).
+            return [main_mod.model.DEFAULT_MODEL]
+
+    monkeypatch.setattr(main_mod, "model_impl", DownModel())
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 502
+
+
+def test_a_failure_falls_back_to_502_if_the_model_list_is_also_unavailable(client, monkeypatch):
+    class TotallyDownModel:
+        def chat(self, messages, tools=None, **kwargs):
+            raise RuntimeError("connection refused")
+
+        def list_models(self, *args, **kwargs):
+            raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(main_mod, "model_impl", TotallyDownModel())
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 502
+
+
 def test_streaming_tool_call_executes_and_continues(client, monkeypatch):
     class StreamLoopModel:
         def chat_stream(self, messages, tools=None, **kwargs):

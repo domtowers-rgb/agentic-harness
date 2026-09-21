@@ -171,6 +171,40 @@ async def _iter_in_thread(sync_iterable: Iterator[Dict]) -> AsyncIterator[Dict]:
         yield item
 
 
+async def _call_model(**kwargs) -> Dict:
+    """Runs model_impl.chat in a thread, same as before, but turns a failure
+    into something a caller can act on instead of an opaque 500.
+
+    Specifically: if the call fails and the model it asked for isn't in the
+    backend's current model list, that's almost certainly *why* it failed
+    (e.g. AGENTIC_DEFAULT_MODEL points at a model that isn't loaded in LM
+    Studio) - raise a 404 carrying the requested name and what's actually
+    available, so a client (e.g. the Signal gateway) can offer the user a
+    choice instead of just relaying "something went wrong" with no way to
+    recover short of an operator fixing the server's config. Any other
+    failure (backend unreachable, etc.) still becomes a plain error, since
+    there's nothing more specific to say about it here.
+
+    Only wraps the non-streaming path - chat_stream()'s errors surface
+    inside an already-started SSE response, which is a bigger change to
+    handle well; the web UI is the only caller of that path today.
+    """
+    try:
+        return await asyncio.to_thread(model_impl.chat, **kwargs)
+    except Exception as exc:
+        requested_model = kwargs.get("model") or model.DEFAULT_MODEL
+        try:
+            available = await asyncio.to_thread(model_impl.list_models)
+        except Exception:
+            available = None
+        if available is not None and requested_model not in available:
+            raise HTTPException(
+                status_code=404,
+                detail={"type": "model_not_found", "model": requested_model, "available_models": available},
+            )
+        raise HTTPException(status_code=502, detail=f"model backend error: {exc}")
+
+
 @app.get("/v1/models")
 async def list_models():
     try:
@@ -313,7 +347,7 @@ async def chat_completions(request: Request):
     # until it returns a plain response or we hit the iteration cap. Runs the
     # blocking model call in a thread so a slow local model doesn't block the
     # event loop.
-    resp = await asyncio.to_thread(model_impl.chat, messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
+    resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
     iterations = 0
     while iterations < MAX_TOOL_ITERATIONS:
         choice = resp["choices"][0]
@@ -326,7 +360,7 @@ async def chat_completions(request: Request):
         if error:
             raise HTTPException(status_code=400, detail=error)
 
-        resp = await asyncio.to_thread(model_impl.chat, messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
+        resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
         iterations += 1
 
     return JSONResponse(content=resp)
