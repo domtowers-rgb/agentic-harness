@@ -87,8 +87,8 @@ Built-in plugins:
 
 - `calculate` - safe arithmetic (AST-based, no `eval`).
 - `get_current_time` - current date/time, optionally in an IANA timezone.
-- `fetch_url` - fetch a public http(s) URL's text. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection).
-- `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY`; without it, the tool reports a clear error instead of failing silently.
+- `fetch_url` - fetch a public http(s) URL as readable text: HTML pages are converted to plain text (scripts, styles, menus, footers, cookie banners and hidden elements dropped; if the page marks its main content with `<main>`, only that is kept) and returned with the page title, typically a small fraction of the raw HTML's size. JSON and plain text pass through as-is; binary content (PDFs, images) is refused. Capped at `AGENTIC_FETCH_MAX_CHARS`. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection). A failed DNS lookup is reported as such (with one retry for a temporary resolver failure), not as a private address.
+- `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY` (a free key from https://brave.com/search/api/ covers about 2,000 searches a month); without it, every call returns a "not configured" error - check `audit.log` if searches never seem to find anything. Result titles and snippets are flattened to plain text.
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
 - `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it.
 - `remember` / `recall` / `forget` - a small persistent key-value notes store (in `memory.json` in the same sandboxed directory), so the model can save and retrieve small facts across separate conversations, not just within one.
@@ -99,6 +99,7 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_FILES_DIR`: sandbox directory for `read_file`/`write_file`/`list_files`/`run_command` (default `workspace/`).
 - `AGENTIC_ENABLE_SHELL`: set to `1` to enable `run_command`.
 - `BRAVE_API_KEY`: enables `web_search`.
+- `AGENTIC_FETCH_MAX_CHARS`: max characters of page text `fetch_url` returns (default `8000`, applied after HTML-to-text conversion). The whole result goes into the model's context, so keep it well inside your model's window.
 
 Audit log
 

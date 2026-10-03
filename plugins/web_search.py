@@ -2,6 +2,8 @@ import os
 
 import httpx
 
+from plugins.fetch_url import html_to_text
+
 ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 TIMEOUT_SECONDS = 10.0
 
@@ -24,11 +26,17 @@ def web_search(query: str, count: int = 5):
         return {"error": f"search request failed: {exc}"}
 
     data = resp.json()
+    # Brave marks matched terms with <strong> and leaves entities encoded -
+    # noise to the model, so they're flattened to plain text.
     results = [
-        {"title": r.get("title"), "url": r.get("url"), "snippet": r.get("description")}
+        {"title": _plain(r.get("title")), "url": r.get("url"), "snippet": _plain(r.get("description"))}
         for r in data.get("web", {}).get("results", [])[:count]
     ]
     return {"results": results}
+
+
+def _plain(fragment):
+    return html_to_text(fragment)[1].replace("\n", " ") if fragment else fragment
 
 
 def register(registry):

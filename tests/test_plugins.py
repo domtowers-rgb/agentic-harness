@@ -252,6 +252,40 @@ class TestFetchUrl:
         result = fetch_url("https://this-domain-should-not-exist-xyz123.invalid")
         assert "error" in result
 
+    def test_unresolvable_host_is_not_reported_as_a_private_address(self):
+        from plugins.fetch_url import fetch_url
+        result = fetch_url("https://this-domain-should-not-exist-xyz123.invalid")
+        assert "could not look up" in result["error"]
+        assert "private" not in result["error"]
+
+    def test_temporary_dns_failure_is_retried_once(self, monkeypatch):
+        import plugins.fetch_url as fetch_module
+        monkeypatch.setattr(fetch_module, "DNS_RETRY_DELAY_SECONDS", 0)
+        calls = []
+
+        def flaky(host, *args, **kwargs):
+            calls.append(host)
+            if len(calls) == 1:
+                raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", 0))]
+
+        monkeypatch.setattr(socket, "getaddrinfo", flaky)
+        assert fetch_module._resolve_pinned_ip("example.org") == ("93.184.215.14", None)
+        assert len(calls) == 2
+
+    def test_unknown_host_is_not_retried(self, monkeypatch):
+        import plugins.fetch_url as fetch_module
+        calls = []
+
+        def missing(host, *args, **kwargs):
+            calls.append(host)
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+        monkeypatch.setattr(socket, "getaddrinfo", missing)
+        ip, error = fetch_module._resolve_pinned_ip("nope.invalid")
+        assert ip is None and "could not look up" in error
+        assert len(calls) == 1
+
     def test_fetches_real_public_url(self):
         from plugins.fetch_url import fetch_url
         result = fetch_url("https://example.com")
@@ -274,6 +308,87 @@ class TestFetchUrl:
         if "error" in result:
             pytest.skip(f"network unavailable: {result['error']}")
         assert calls.count("example.com") == 1
+
+
+class TestHtmlToText:
+    def _text(self, html):
+        from plugins.fetch_url import html_to_text
+        return html_to_text(html)
+
+    def test_keeps_text_and_title_drops_scripts_and_styles(self):
+        title, text = self._text(
+            "<html><head><title> My  Page </title><style>p{color:red}</style></head>"
+            "<body><script>var x = 1;</script><p>Hello &amp; welcome</p><p>Second</p></body></html>"
+        )
+        assert title == "My Page"
+        assert text == "Hello & welcome\nSecond"
+
+    def test_drops_page_furniture_by_tag_role_class_and_hidden(self):
+        _, text = self._text(
+            "<body><nav>Menu</nav><div role='navigation'>Links</div><div class='cookie-banner'>Cookies</div>"
+            "<div hidden>Secret</div><span aria-hidden='true'>Icon</span><footer>Footer</footer>"
+            "<p>Real content</p></body>"
+        )
+        assert text == "Real content"
+
+    def test_prefers_main_content_when_marked(self):
+        _, text = self._text("<body><div>Banner outside</div><main><h1>Story</h1><p>Body</p></main><div>After</div></body>")
+        assert text == "Story\nBody"
+
+    def test_uses_whole_page_when_no_main(self):
+        _, text = self._text("<body><div>One</div><div>Two</div></body>")
+        assert text == "One\nTwo"
+
+    def test_nested_same_tag_inside_skipped_region_does_not_end_it_early(self):
+        _, text = self._text("<div class='sidebar'><div>inner</div>still sidebar</div><p>content</p>")
+        assert text == "content"
+
+    def test_list_items_get_bullets(self):
+        _, text = self._text("<ul><li>a</li><li>b</li></ul>")
+        assert text == "- a\n- b"
+
+    def test_only_the_first_title_counts(self):
+        title, _ = self._text("<head><title>Real</title></head><body><svg><title>icon</title></svg><p>x</p></body>")
+        assert title == "Real"
+
+    def test_word_matching_avoids_false_positives(self):
+        # "shared-results" contains "share" but not as a whole word.
+        _, text = self._text("<div class='shared-results'>keep me</div>")
+        assert text == "keep me"
+
+
+class TestFetchUrlContentTypes:
+    def _fetch(self, monkeypatch, content_type, body):
+        import httpx
+        import plugins.fetch_url as fetch_module
+
+        monkeypatch.setattr(fetch_module, "_resolve_pinned_ip", lambda host: ("93.184.215.14", None))
+
+        def fake_send(self, request, **kwargs):
+            headers = {"content-type": content_type} if content_type else {}
+            return httpx.Response(200, headers=headers, content=body.encode(), request=request)
+
+        monkeypatch.setattr(httpx.Client, "send", fake_send)
+        return fetch_module.fetch_url("https://example.org/page")
+
+    def test_html_is_converted_to_text(self, monkeypatch):
+        result = self._fetch(monkeypatch, "text/html; charset=utf-8", "<title>T</title><main><p>Hi</p></main>")
+        assert result == {"status": 200, "title": "T", "content": "Hi", "truncated": False}
+
+    def test_json_and_plain_text_pass_through(self, monkeypatch):
+        assert self._fetch(monkeypatch, "application/json", '{"a": 1}')["content"] == '{"a": 1}'
+        assert self._fetch(monkeypatch, "text/plain", "plain <b>text</b>")["content"] == "plain <b>text</b>"
+
+    def test_binary_content_is_refused(self, monkeypatch):
+        result = self._fetch(monkeypatch, "application/pdf", "%PDF-1.7")
+        assert "not a text page" in result["error"]
+
+    def test_long_text_is_truncated(self, monkeypatch):
+        import plugins.fetch_url as fetch_module
+        monkeypatch.setattr(fetch_module, "MAX_CHARS", 10)
+        result = self._fetch(monkeypatch, "text/plain", "x" * 50)
+        assert result["content"] == "x" * 10
+        assert result["truncated"] is True
 
 
 class TestWebSearch:
@@ -329,3 +444,25 @@ class TestShellExec:
         module = self._reload(monkeypatch, enabled=True, files_dir=tmp_path)
         result = module.run_command("this-command-should-not-exist-xyz")
         assert "error" in result
+
+
+class TestWebSearchResults:
+    def test_snippets_are_flattened_to_plain_text(self, monkeypatch):
+        import httpx
+        import plugins.web_search as web_search_module
+
+        monkeypatch.setenv("BRAVE_API_KEY", "test-key")
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            assert headers["X-Subscription-Token"] == "test-key"
+            return httpx.Response(200, json={"web": {"results": [{
+                "title": "Signal &amp; privacy",
+                "url": "https://example.org",
+                "description": "The <strong>Signal</strong> app is <strong>encrypted</strong>.",
+            }]}}, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(web_search_module.httpx, "get", fake_get)
+        result = web_search_module.web_search("signal")
+        assert result == {"results": [{
+            "title": "Signal & privacy", "url": "https://example.org", "snippet": "The Signal app is encrypted.",
+        }]}
