@@ -69,17 +69,40 @@ def _load_personality(path: str) -> str:
 PERSONALITY = _load_personality(PERSONALITY_FILE)
 
 
+def _content_chars(message: Dict[str, Any]) -> int:
+    content = message.get("content")
+    if content is None:
+        return 0  # e.g. an assistant turn that only made tool calls
+    if isinstance(content, str):
+        return len(content)
+    return len(json.dumps(content, default=str))  # e.g. a list of content parts
+
+
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
-    # very simple heuristic: assume 4 chars per token
+    """Drop the oldest messages until the history fits max_tokens (very
+    simple heuristic: ~4 chars per token).
+
+    Never drops the newest message - previously, one long enough to blow
+    the budget on its own (a pasted document, say) was dropped along with
+    everything else, so the model got no question at all and answered
+    nothing in particular. Better to send it over budget and let the
+    backend complain if it really doesn't fit. A leading system message is
+    kept too, so a client's own system prompt survives a long
+    conversation instead of being the first thing trimmed. And the kept
+    history never starts with an orphaned tool result whose assistant
+    tool-call turn was dropped - backends reject that."""
     allowed_chars = max_tokens * 4
-    total = sum(len(m.get("content", "")) for m in messages)
-    if total <= allowed_chars:
+    if sum(_content_chars(m) for m in messages) <= allowed_chars:
         return messages
-    # drop oldest until under budget
-    out = messages[:]
-    while out and sum(len(m.get("content", "")) for m in out) > allowed_chars:
-        out.pop(0)
-    return out
+
+    system = messages[:1] if messages and messages[0].get("role") == "system" else []
+    rest = messages[len(system):]
+    budget = allowed_chars - sum(_content_chars(m) for m in system)
+    while len(rest) > 1 and sum(_content_chars(m) for m in rest) > budget:
+        rest.pop(0)
+    while len(rest) > 1 and rest[0].get("role") == "tool":
+        rest.pop(0)
+    return system + rest
 
 
 # Local audit trail of every tool call: what was invoked, with what
@@ -113,35 +136,69 @@ def _audit_log(tool_name: str, args: Any, result: Any) -> None:
         print(f"[audit] failed to write audit log entry: {exc}")
 
 
-def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> str:
+def _call_tool(fname: str, args_text: Any):
+    """Run one tool call, returning (args, result). Any failure - an
+    unknown tool, unparseable arguments, or the plugin itself raising -
+    becomes an {"error": ...} result rather than an exception, so it goes
+    back to the model as that call's tool result (which it can recover
+    from: retry with fixed arguments, try something else, or explain)
+    instead of aborting the whole request."""
+    try:
+        args = json.loads(args_text) if isinstance(args_text, str) else args_text
+    except json.JSONDecodeError as exc:
+        return args_text, {"error": f"arguments were not valid JSON: {exc}"}
+
+    plugin = plugins.registry.get(fname)
+    if not plugin:
+        return args, {"error": f"unknown function: {fname}"}
+
+    try:
+        try:
+            return args, plugin["callable"](**(args or {}))
+        except TypeError:
+            return args, plugin["callable"](args)
+    except Exception as exc:
+        return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
+
+
+def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> None:
     """Execute tool_calls via the plugin registry, appending the assistant and
-    tool-result messages to `messages` in place. Returns an error string if a
-    requested tool is unknown, otherwise None."""
+    tool-result messages to `messages` in place. Blocking (plugins are plain
+    sync functions, some doing network I/O) - callers run it in a thread."""
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
     for tool_call in tool_calls:
         fn = tool_call.get("function", {})
         fname = fn.get("name")
-        args_text = fn.get("arguments") or "{}"
-        try:
-            args = json.loads(args_text) if isinstance(args_text, str) else args_text
-        except Exception:
-            args = {}
-
-        plugin = plugins.registry.get(fname)
-        if not plugin:
-            _audit_log(fname, args, {"error": "unknown function"})
-            return f"unknown function: {fname}"
-
-        try:
-            result = plugin["callable"](**(args or {}))
-        except TypeError:
-            result = plugin["callable"](args)
-
+        args, result = _call_tool(fname, fn.get("arguments") or "{}")
         _audit_log(fname, args, result)
-        messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result)})
+        messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
 
-    return None
+
+# Appended once MAX_TOOL_ITERATIONS is used up, for one last round with
+# tool_choice="none" - so the model gives a real answer from what it has
+# instead of the request ending on a tool-call turn with no text (which a
+# client like the Signal gateway sees as an empty reply and sends nothing).
+# A user-role message rather than a system one: several local chat
+# templates (Qwen's, for one) reject a system message anywhere but first.
+#
+# The tools stay *listed* in that round (just with tool_choice="none")
+# rather than being dropped: tested live, Gemma 4 with no tools listed
+# would sometimes still try, writing its raw tool-call syntax out as the
+# reply text. With them listed, the backend still parses such an attempt
+# into a real tool call, which the caller then replaces with a fallback.
+TOOL_LIMIT_NUDGE = {
+    "role": "user",
+    "content": (
+        "Tool calls are no longer available for this request. Do not call or write out any tool calls. "
+        "Reply now in plain text with your best answer from the results you already have, "
+        "and say what you couldn't finish."
+    ),
+}
+
+
+def _tool_limit_fallback() -> str:
+    return f"Sorry - I stopped after {MAX_TOOL_ITERATIONS} rounds of tool calls without reaching an answer."
 
 
 async def _iter_in_thread(sync_iterable: Iterator[Dict]) -> AsyncIterator[Dict]:
@@ -299,8 +356,15 @@ async def chat_completions(request: Request):
             iterations = 0
             while True:
                 tool_call_accum = {}
+                final_round = iterations >= MAX_TOOL_ITERATIONS
+                if final_round:
+                    messages.append(TOOL_LIMIT_NUDGE)
+                got_content = False
 
-                stream_iter = model_impl.chat_stream(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
+                stream_iter = model_impl.chat_stream(
+                    messages=messages, tools=tools, tool_choice="none" if final_round else "auto",
+                    model=model_name, temperature=temperature, max_tokens=max_tokens,
+                )
                 async for chunk in _iter_in_thread(stream_iter):
                     try:
                         yield f"data: {json.dumps(chunk)}\n\n"
@@ -311,6 +375,8 @@ async def chat_completions(request: Request):
 
                     choices = chunk.get("choices") or []
                     delta = (choices[0].get("delta") or {}) if choices else {}
+                    if delta.get("content"):
+                        got_content = True
                     for tc_delta in delta.get("tool_calls") or []:
                         idx = tc_delta.get("index", 0)
                         slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
@@ -322,7 +388,12 @@ async def chat_completions(request: Request):
                         if fn.get("arguments"):
                             slot["arguments"] += fn["arguments"]
 
-                if not tool_call_accum or iterations >= MAX_TOOL_ITERATIONS:
+                if final_round:
+                    if not got_content:
+                        fallback = {"choices": [{"delta": {"content": _tool_limit_fallback()}, "finish_reason": "stop"}]}
+                        yield f"data: {json.dumps(fallback)}\n\n"
+                    break
+                if not tool_call_accum:
                     break
 
                 tool_calls = [
@@ -333,10 +404,7 @@ async def chat_completions(request: Request):
                     }
                     for idx, slot in sorted(tool_call_accum.items())
                 ]
-                error = _run_tool_calls(messages, tool_calls)
-                if error:
-                    yield f"data: {json.dumps({'error': error})}\n\n"
-                    break
+                await asyncio.to_thread(_run_tool_calls, messages, tool_calls)
                 iterations += 1
 
             yield "data: [DONE]\n\n"
@@ -344,22 +412,32 @@ async def chat_completions(request: Request):
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     # Tool-calling loop: keep executing tool calls and re-prompting the model
-    # until it returns a plain response or we hit the iteration cap. Runs the
-    # blocking model call in a thread so a slow local model doesn't block the
-    # event loop.
+    # until it returns a plain response. Once the iteration cap is used up,
+    # one last round with tool_choice="none" asks for an answer from what it
+    # has (see TOOL_LIMIT_NUDGE). Both the model call and the tools
+    # themselves run in a thread, so neither a slow local model nor a slow
+    # tool (a web fetch, say) blocks the event loop - and with it every
+    # other request.
     resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
     iterations = 0
-    while iterations < MAX_TOOL_ITERATIONS:
-        choice = resp["choices"][0]
-        message = choice.get("message") or {}
+    while True:
+        message = resp["choices"][0].get("message") or {}
         tool_calls = message.get("tool_calls")
         if not tool_calls:
             break
 
-        error = _run_tool_calls(messages, tool_calls, message.get("content"))
-        if error:
-            raise HTTPException(status_code=400, detail=error)
+        if iterations >= MAX_TOOL_ITERATIONS:
+            messages.append(TOOL_LIMIT_NUDGE)
+            resp = await _call_model(
+                messages=messages, tools=tools, tool_choice="none",
+                model=model_name, temperature=temperature, max_tokens=max_tokens,
+            )
+            final = resp["choices"][0].get("message") or {}
+            if final.get("tool_calls") or not (final.get("content") or "").strip():
+                resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
+            break
 
+        await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"))
         resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
         iterations += 1
 

@@ -62,23 +62,108 @@ def test_tool_call_loop_respects_iteration_cap(client, monkeypatch):
         "tools": [{"type": "function", "function": {"name": "hello"}}],
     })
     assert r.status_code == 200
-    # 1 initial call + MAX_TOOL_ITERATIONS follow-ups, then it gives up and
-    # returns the last (still tool_calls-bearing) response.
-    assert calls["n"] == main_mod.MAX_TOOL_ITERATIONS + 1
+    # 1 initial call + MAX_TOOL_ITERATIONS follow-ups + 1 final no-tools
+    # round. This model keeps emitting tool calls even then, so the reply
+    # is the plain-text fallback rather than an empty, tool_calls-only turn.
+    assert calls["n"] == main_mod.MAX_TOOL_ITERATIONS + 2
+    message = r.json()["choices"][0]["message"]
+    assert message["content"] == main_mod._tool_limit_fallback()
+    assert not message.get("tool_calls")
 
 
-def test_unknown_tool_call_returns_400(client, monkeypatch):
-    class BadToolModel:
-        def chat(self, messages, tools=None, **kwargs):
-            return {"choices": [{"message": {
-                "role": "assistant", "content": None,
-                "tool_calls": [{"id": "call_1", "type": "function",
-                                 "function": {"name": "does_not_exist", "arguments": "{}"}}],
-            }}]}
+def _tool_call_response(name, arguments="{}", call_id="call_1"):
+    return {"choices": [{"message": {
+        "role": "assistant", "content": None,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}],
+    }}]}
 
-    monkeypatch.setattr(main_mod, "model_impl", BadToolModel())
+
+def _text_response(text):
+    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+class ScriptedModel:
+    """Returns `responses` in order (repeating the last one), recording the
+    messages and tools each call was given."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def chat(self, messages, tools=None, **kwargs):
+        self.calls.append({"messages": [dict(m) for m in messages], "tools": tools, "tool_choice": kwargs.get("tool_choice")})
+        return self.responses[min(len(self.calls), len(self.responses)) - 1]
+
+
+def _last_tool_result(model_call):
+    tool_messages = [m for m in model_call["messages"] if m["role"] == "tool"]
+    return json.loads(tool_messages[-1]["content"])
+
+
+def test_tool_call_limit_asks_for_a_final_answer_with_tool_choice_none(client, monkeypatch):
+    loops = [_tool_call_response("hello", call_id=f"call_{i}") for i in range(main_mod.MAX_TOOL_ITERATIONS + 1)]
+    fake = ScriptedModel(*loops, _text_response("here's what I found"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
     r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
-    assert r.status_code == 400
+
+    assert r.json()["choices"][0]["message"]["content"] == "here's what I found"
+    final_call = fake.calls[-1]
+    assert final_call["tool_choice"] == "none"
+    assert all(c["tool_choice"] in (None, "auto") for c in fake.calls[:-1])
+    assert final_call["messages"][-1] == main_mod.TOOL_LIMIT_NUDGE
+
+
+def test_unknown_tool_call_is_reported_back_to_the_model(client, monkeypatch):
+    fake = ScriptedModel(_tool_call_response("does_not_exist"), _text_response("sorry, no such tool"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "sorry, no such tool"
+    assert _last_tool_result(fake.calls[1]) == {"error": "unknown function: does_not_exist"}
+
+
+def test_a_plugin_that_raises_is_reported_back_to_the_model(client, monkeypatch):
+    def boom():
+        raise ValueError("upstream timed out")
+
+    monkeypatch.setitem(main_mod.plugins.registry._registry, "boom", {"callable": boom, "spec": None})
+    fake = ScriptedModel(_tool_call_response("boom"), _text_response("that tool failed"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "that tool failed"
+    assert _last_tool_result(fake.calls[1]) == {"error": "boom failed: ValueError: upstream timed out"}
+
+
+def test_invalid_tool_arguments_are_reported_back_to_the_model(client, monkeypatch):
+    fake = ScriptedModel(_tool_call_response("hello", arguments="{not json"), _text_response("oops"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    assert r.status_code == 200
+    assert "not valid JSON" in _last_tool_result(fake.calls[1])["error"]
+
+
+def test_tools_run_off_the_event_loop(client, monkeypatch):
+    import asyncio
+
+    seen = {}
+
+    def where_am_i():
+        try:
+            asyncio.get_running_loop()
+            seen["on_event_loop"] = True
+        except RuntimeError:
+            seen["on_event_loop"] = False
+        return "ok"
+
+    monkeypatch.setitem(main_mod.plugins.registry._registry, "where_am_i", {"callable": where_am_i, "spec": None})
+    monkeypatch.setattr(main_mod, "model_impl", ScriptedModel(_tool_call_response("where_am_i"), _text_response("done")))
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    assert seen == {"on_event_loop": False}
 
 
 def test_missing_model_returns_a_machine_readable_404(client, monkeypatch):
@@ -453,15 +538,7 @@ def test_audit_log_records_unknown_tool_call(client, monkeypatch, tmp_path):
     log_path = tmp_path / "audit.log"
     monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(log_path))
 
-    class BadToolModel:
-        def chat(self, messages, tools=None, **kwargs):
-            return {"choices": [{"message": {
-                "role": "assistant", "content": None,
-                "tool_calls": [{"id": "call_1", "type": "function",
-                                 "function": {"name": "does_not_exist", "arguments": "{}"}}],
-            }}]}
-
-    monkeypatch.setattr(main_mod, "model_impl", BadToolModel())
+    monkeypatch.setattr(main_mod, "model_impl", ScriptedModel(_tool_call_response("does_not_exist"), _text_response("ok")))
     client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
 
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
@@ -497,3 +574,105 @@ def test_truncate_messages_keeps_short_history():
     from agentic_harness.main import _truncate_messages
     messages = [{"role": "user", "content": "hi"}]
     assert _truncate_messages(messages, max_tokens=1000) == messages
+
+
+def test_truncate_messages_never_drops_the_newest_message():
+    from agentic_harness.main import _truncate_messages
+    messages = [{"role": "user", "content": "old"}, {"role": "user", "content": "x" * 10000}]
+    assert _truncate_messages(messages, max_tokens=10) == [messages[-1]]
+
+
+def test_truncate_messages_keeps_a_leading_system_message():
+    from agentic_harness.main import _truncate_messages
+    messages = [{"role": "system", "content": "be terse"}] + [{"role": "user", "content": "x" * 100} for _ in range(10)]
+    out = _truncate_messages(messages, max_tokens=60)
+    assert out[0] == messages[0]
+    assert out[-1] == messages[-1]
+    assert len(out) < len(messages)
+
+
+def test_truncate_messages_does_not_start_on_an_orphaned_tool_result():
+    from agentic_harness.main import _truncate_messages
+    messages = [
+        {"role": "user", "content": "x" * 400},
+        {"role": "assistant", "content": "let me check " * 5, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "y" * 40},
+        {"role": "user", "content": "next question"},
+    ]
+    # 80-char budget: the assistant turn has to go, which would leave the
+    # tool result first - it goes too rather than being sent orphaned.
+    out = _truncate_messages(messages, max_tokens=20)
+    assert out == [messages[-1]]
+
+
+def test_truncate_messages_tolerates_non_string_content():
+    from agentic_harness.main import _truncate_messages
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "user", "content": [{"type": "text", "text": "x" * 100}]},
+        {"role": "user", "content": "hi"},
+    ]
+    assert _truncate_messages(messages, max_tokens=5) == [messages[-1]]
+
+
+def test_streaming_tool_call_limit_asks_for_a_final_answer(client, monkeypatch):
+    rounds = []
+
+    class StreamInfiniteModel:
+        def chat_stream(self, messages, tools=None, **kwargs):
+            rounds.append({"tool_choice": kwargs.get("tool_choice"), "last": dict(messages[-1])})
+            if kwargs.get("tool_choice") == "none":
+                yield {"choices": [{"delta": {"content": "final answer"}, "finish_reason": "stop"}]}
+                return
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": f"call_{len(rounds)}", "type": "function",
+                 "function": {"name": "hello", "arguments": "{}"}},
+            ]}, "finish_reason": "tool_calls"}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", StreamInfiniteModel())
+    with client.stream("POST", "/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "go"}], "stream": True,
+    }) as r:
+        lines = [line for line in r.iter_lines() if line]
+
+    assert len(rounds) == main_mod.MAX_TOOL_ITERATIONS + 1
+    assert rounds[-1] == {"tool_choice": "none", "last": main_mod.TOOL_LIMIT_NUDGE}
+    assert lines[-1] == "data: [DONE]"
+    assert "final answer" in lines[-2]
+
+
+def test_streaming_tool_call_limit_falls_back_when_no_text_comes_back(client, monkeypatch):
+    class StreamToolsForever:
+        def chat_stream(self, messages, tools=None, **kwargs):
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_x", "type": "function", "function": {"name": "hello", "arguments": "{}"}},
+            ]}, "finish_reason": "tool_calls"}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", StreamToolsForever())
+    with client.stream("POST", "/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "go"}], "stream": True,
+    }) as r:
+        lines = [line for line in r.iter_lines() if line]
+
+    fallback = json.loads(lines[-2][len("data: "):])
+    assert fallback["choices"][0]["delta"]["content"] == main_mod._tool_limit_fallback()
+
+
+def test_streaming_unknown_tool_is_reported_back_and_continues(client, monkeypatch):
+    class StreamBadTool:
+        def chat_stream(self, messages, tools=None, **kwargs):
+            if messages[-1]["role"] == "tool":
+                yield {"choices": [{"delta": {"content": json.loads(messages[-1]["content"])["error"]}}]}
+                return
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "type": "function", "function": {"name": "nope", "arguments": "{}"}},
+            ]}, "finish_reason": "tool_calls"}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", StreamBadTool())
+    with client.stream("POST", "/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "go"}], "stream": True,
+    }) as r:
+        lines = [line for line in r.iter_lines() if line]
+
+    assert "unknown function: nope" in lines[-2]
+    assert lines[-1] == "data: [DONE]"
