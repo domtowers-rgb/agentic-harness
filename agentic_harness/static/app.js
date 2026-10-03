@@ -556,6 +556,19 @@ async function submit() {
           continue;
         }
 
+        if (chunk.attachments) {
+          // Files a tool created this turn (e.g. a presentation) - added to
+          // the reply as download links, so they're saved with it too.
+          const links = chunk.attachments
+            .map((a) => '[Download ' + a.filename + '](' + location.origin + encodeURI(a.url) + ')')
+            .join('\n');
+          assistantText += (assistantText ? '\n\n' : '') + links;
+          gotContent = true;
+          setTyping(assistantEl, false);
+          assistantEl.innerHTML = renderMarkdown(assistantText);
+          continue;
+        }
+
         const choice = (chunk.choices || [])[0] || {};
         const delta = choice.delta || {};
 

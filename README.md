@@ -90,7 +90,9 @@ Built-in plugins:
 - `fetch_url` - fetch a public http(s) URL as readable text: HTML pages are converted to plain text (scripts, styles, menus, footers, cookie banners and hidden elements dropped; if the page marks its main content with `<main>`, only that is kept) and returned with the page title, typically a small fraction of the raw HTML's size. JSON and plain text pass through as-is; binary content (PDFs, images) is refused. Capped at `AGENTIC_FETCH_MAX_CHARS`. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection). A failed DNS lookup is reported as such (with one retry for a temporary resolver failure), not as a private address.
 - `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY` (a free key from https://brave.com/search/api/ covers about 2,000 searches a month); without it, every call returns a "not configured" error - check `audit.log` if searches never seem to find anything. Result titles and snippets are flattened to plain text.
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
-- `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it.
+- `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it. Sent to the user as a file (see "Files in and out").
+- `create_document` - creates a Word (.docx) document in the same directory: a title, then per section an optional heading, paragraphs and bullet points. Also sent to the user as a file.
+- `read_document` - reads the text of a PDF, Word (.docx), PowerPoint (.pptx) or plain-text file in the same directory, including files the user has sent. Long documents come back `AGENTIC_READ_MAX_CHARS` (default `8000`) at a time; the result's `next_start` says where to continue. Scanned PDFs (images of text) have no extractable text.
 - `remember` / `recall` / `forget` - a small persistent key-value notes store (in `memory.json` in the same sandboxed directory), so the model can save and retrieve small facts across separate conversations, not just within one.
 - `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
 
@@ -99,7 +101,22 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_FILES_DIR`: sandbox directory for `read_file`/`write_file`/`list_files`/`run_command` (default `workspace/`).
 - `AGENTIC_ENABLE_SHELL`: set to `1` to enable `run_command`.
 - `BRAVE_API_KEY`: enables `web_search`.
+- `AGENTIC_READ_MAX_CHARS`: how much text `read_document` returns per call (default `8000`).
+- `AGENTIC_MAX_UPLOAD_BYTES`: largest file `POST /v1/files` accepts (default 25 MB).
 - `AGENTIC_FETCH_MAX_CHARS`: max characters of page text `fetch_url` returns (default `8000`, applied after HTML-to-text conversion). The whole result goes into the model's context, so keep it well inside your model's window.
+
+Files in and out
+
+- **Out:** a plugin marks a file it created for the user by including `"attachment": "<path in the sandbox>"` in its result (`create_presentation` and `create_document` do; `write_file` doesn't - it's for the model's own working files). Every file marked during a request is listed in the response as an extra top-level field, which OpenAI-compatible clients simply ignore:
+
+  ```json
+  "attachments": [{"filename": "deck.pptx", "path": "deck.pptx", "url": "/v1/files/deck.pptx", "size": 30880, "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}]
+  ```
+
+  On the streaming path it arrives as one extra `data: {"attachments": [...]}` event just before `[DONE]`. `GET /v1/files/{path}` downloads it. The web UI shows a "Download ..." link under the reply, and [agentic-gateway](https://github.com/domtowers-rgb/agentic-gateway) sends the file over Signal as an attachment.
+- **In:** `POST /v1/files?filename=report.pdf` with the file as the raw request body saves it into `uploads/` in the sandbox (never overwriting: a clashing name gets `-2`, `-3`...) and returns `{"path": "uploads/report.pdf", ...}` - which a client then mentions in its message, so the model can `read_document` it. agentic-gateway does this for files sent over Signal.
+
+Both endpoints serve only the sandbox directory, with the same local-only trust model as the file plugins themselves (the server listens on 127.0.0.1 only; anything that can reach it could already ask `read_file` for the same content).
 
 Audit log
 

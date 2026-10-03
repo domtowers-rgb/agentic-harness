@@ -4,3 +4,5 @@ openai
 httpx
 tzdata
 python-pptx
+pypdf
+python-docx

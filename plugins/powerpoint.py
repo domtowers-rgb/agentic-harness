@@ -3,17 +3,19 @@ import re
 from pptx import Presentation
 
 from plugins.file_ops import SANDBOX_DIR, _resolve_safe
+from plugins.word_document import DELIVERY_NOTE
 
 MAX_SLIDES = 100
 MAX_BULLETS_PER_SLIDE = 50
 
 
 def _sanitize_filename(name: str) -> str:
+    # Drop the extension *before* stripping unsafe characters - otherwise
+    # its dot goes and "notes.pptx" becomes "notespptx.pptx".
+    if name.lower().endswith(".pptx"):
+        name = name[:-5]
     name = re.sub(r"[^A-Za-z0-9 _-]", "", name).strip().replace(" ", "_")
-    name = name[:80] or "presentation"
-    if not name.lower().endswith(".pptx"):
-        name += ".pptx"
-    return name
+    return (name[:80] or "presentation") + ".pptx"
 
 
 def create_presentation(title: str, slides: list, subtitle: str = None, filename: str = None):
@@ -60,18 +62,17 @@ def create_presentation(title: str, slides: list, subtitle: str = None, filename
     except Exception as exc:
         return {"error": f"failed to create presentation: {exc}"}
 
-    return {
-        "status": "written",
-        "path": str(target.relative_to(SANDBOX_DIR)),
-        "slide_count": len(slides) + 1,
-    }
+    path = str(target.relative_to(SANDBOX_DIR))
+    # "attachment" marks this as a file to hand back to the user - see
+    # _run_tool_calls in agentic_harness/main.py.
+    return {"status": "written", "path": path, "attachment": path, "slide_count": len(slides) + 1, "note": DELIVERY_NOTE}
 
 
 def register(registry):
     registry.register("create_presentation", create_presentation, {
         "name": "create_presentation",
         "description": (
-            f"Create a PowerPoint (.pptx) presentation in the sandboxed working directory ({SANDBOX_DIR}). "
+            "Create a PowerPoint (.pptx) presentation and send it to the user. "
             "The first slide is a title slide; each entry in 'slides' becomes a slide with a title and "
             "bullet points."
         ),

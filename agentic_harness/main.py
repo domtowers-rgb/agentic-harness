@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 from . import model, plugins
 import os
+import re
 import json
 import asyncio
+import mimetypes
 import queue
 from datetime import datetime, timezone
 from typing import List, Dict, Any, AsyncIterator, Iterator
@@ -28,6 +30,11 @@ HISTORY_MAX_TOKENS = int(os.environ.get("AGENTIC_HISTORY_MAX_TOKENS", "2048"))
 
 # load plugins at startup
 plugins.load_plugins()
+
+# The same sandbox the file plugins use - created files are served from,
+# and uploads saved into, it. Imported after load_plugins() so a broken
+# plugin elsewhere can't stop this one from loading first.
+from plugins.file_ops import SANDBOX_DIR, _resolve_safe  # noqa: E402
 
 # choose model implementation based on env
 MODEL_BACKEND = os.environ.get("AGENTIC_MODEL", "mock")
@@ -161,18 +168,50 @@ def _call_tool(fname: str, args_text: Any):
         return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
 
 
-def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> None:
+def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> List[str]:
     """Execute tool_calls via the plugin registry, appending the assistant and
     tool-result messages to `messages` in place. Blocking (plugins are plain
-    sync functions, some doing network I/O) - callers run it in a thread."""
+    sync functions, some doing network I/O) - callers run it in a thread.
+
+    Returns the workspace paths of any files the tools created for the
+    user: a plugin marks one by including "attachment": <workspace-relative
+    path> in its result (create_presentation and create_document do).
+    Callers pass these on to the client - see _describe_attachments."""
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
+    attachments = []
     for tool_call in tool_calls:
         fn = tool_call.get("function", {})
         fname = fn.get("name")
         args, result = _call_tool(fname, fn.get("arguments") or "{}")
         _audit_log(fname, args, result)
         messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
+        if isinstance(result, dict) and isinstance(result.get("attachment"), str):
+            attachments.append(result["attachment"])
+    return attachments
+
+
+def _describe_attachments(paths: List[str]) -> List[Dict[str, Any]]:
+    """What the client gets for each created file: enough to show it and
+    download it from GET /v1/files/{path}. A path created twice in one
+    request (the model regenerating a file) is listed once; one that no
+    longer exists is dropped."""
+    described = []
+    for path in dict.fromkeys(paths):
+        try:
+            target = _resolve_safe(path)
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        described.append({
+            "filename": target.name,
+            "path": path,
+            "url": f"/v1/files/{path}",
+            "size": target.stat().st_size,
+            "content_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+        })
+    return described
 
 
 # Appended once MAX_TOOL_ITERATIONS is used up, for one last round with
@@ -260,6 +299,64 @@ async def _call_model(**kwargs) -> Dict:
                 detail={"type": "model_not_found", "model": requested_model, "available_models": available},
             )
         raise HTTPException(status_code=502, detail=f"model backend error: {exc}")
+
+
+# Files the user sends (e.g. over Signal, via agentic-gateway) are saved
+# here, inside the same sandbox the file plugins use - so read_document
+# can then read them by the path this returns.
+UPLOAD_DIR = "uploads"
+MAX_UPLOAD_BYTES = int(os.environ.get("AGENTIC_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+
+
+def _safe_upload_name(filename: str) -> str:
+    name = os.path.basename(filename or "").strip()
+    stem, ext = os.path.splitext(name)
+    stem = re.sub(r"[^A-Za-z0-9 ._-]", "", stem).strip(" .")[:80] or "upload"
+    ext = re.sub(r"[^A-Za-z0-9.]", "", ext)[:10]
+    return f"{stem}{ext}".replace(" ", "_")
+
+
+@app.post("/v1/files")
+async def upload_file(request: Request, filename: str = ""):
+    """Save the raw request body as a file in the sandbox's uploads/ folder
+    and return its workspace path. Raw body + ?filename= rather than a
+    multipart form, to avoid an extra dependency (python-multipart) for a
+    single-file upload. An existing name gets a numeric suffix rather than
+    being overwritten."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+    body = await request.body()
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+
+    name = _safe_upload_name(filename)
+    stem, ext = os.path.splitext(name)
+    target = _resolve_safe(os.path.join(UPLOAD_DIR, name))
+    counter = 1
+    while target.exists():
+        counter += 1
+        target = _resolve_safe(os.path.join(UPLOAD_DIR, f"{stem}-{counter}{ext}"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target.write_bytes, body)
+    path = str(target.relative_to(SANDBOX_DIR))
+    return JSONResponse(content={"path": path, "filename": target.name, "size": len(body)})
+
+
+@app.get("/v1/files/{path:path}")
+async def download_file(path: str):
+    """Download a file from the sandbox - how a client fetches what a tool
+    created (see the "attachments" in a chat completion response). Same
+    sandbox, and same local-only trust model, as the file plugins
+    themselves: anything that can reach this server could already ask
+    read_file for the same content."""
+    try:
+        target = _resolve_safe(path)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not found")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(target, filename=target.name)
 
 
 @app.get("/v1/models")
@@ -354,6 +451,7 @@ async def chat_completions(request: Request):
             # in the same SSE response - repeating until a plain response comes
             # back or the iteration cap is hit.
             iterations = 0
+            attachment_paths = []
             while True:
                 tool_call_accum = {}
                 final_round = iterations >= MAX_TOOL_ITERATIONS
@@ -404,9 +502,14 @@ async def chat_completions(request: Request):
                     }
                     for idx, slot in sorted(tool_call_accum.items())
                 ]
-                await asyncio.to_thread(_run_tool_calls, messages, tool_calls)
+                attachment_paths += await asyncio.to_thread(_run_tool_calls, messages, tool_calls)
                 iterations += 1
 
+            attachments = _describe_attachments(attachment_paths)
+            if attachments:
+                # Not a standard chat-completion chunk - an extra event
+                # (no "choices") that clients unaware of it just skip.
+                yield f"data: {json.dumps({'attachments': attachments})}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -420,6 +523,7 @@ async def chat_completions(request: Request):
     # other request.
     resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
     iterations = 0
+    attachment_paths = []
     while True:
         message = resp["choices"][0].get("message") or {}
         tool_calls = message.get("tool_calls")
@@ -437,10 +541,16 @@ async def chat_completions(request: Request):
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"))
+        attachment_paths += await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"))
         resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
         iterations += 1
 
+    # Files created by tools this request, as an extra top-level field
+    # alongside the standard ones - OpenAI-compatible clients ignore it;
+    # agentic-gateway downloads and sends them on.
+    attachments = _describe_attachments(attachment_paths)
+    if attachments:
+        resp["attachments"] = attachments
     return JSONResponse(content=resp)
 
 
