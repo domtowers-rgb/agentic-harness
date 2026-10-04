@@ -1,6 +1,6 @@
 from pptx import Presentation
 
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe, safe_output_name
+from plugins.file_ops import _resolve_safe, safe_output_name, sandbox_dir
 from plugins.word_document import DELIVERY_NOTE
 
 MAX_SLIDES = 100
@@ -55,7 +55,7 @@ def create_presentation(title: str, slides: list, subtitle: str = None, filename
     except Exception as exc:
         return {"error": f"failed to create presentation: {exc}"}
 
-    path = str(target.relative_to(SANDBOX_DIR))
+    path = str(target.relative_to(sandbox_dir()))
     # "attachment" marks this as a file to hand back to the user - see
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "slide_count": len(slides) + 1, "note": DELIVERY_NOTE}

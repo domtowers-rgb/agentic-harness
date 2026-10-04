@@ -1,7 +1,8 @@
 import os
 import shlex
 import subprocess
-from pathlib import Path
+
+from plugins.file_ops import sandbox_dir
 
 # Runs arbitrary commands the model chooses to run - unlike the other
 # plugins, this has effectively unbounded blast radius (an absolute-path
@@ -9,7 +10,6 @@ from pathlib import Path
 # set AGENTIC_ENABLE_SHELL=1 to opt in.
 ENABLED = os.environ.get("AGENTIC_ENABLE_SHELL") == "1"
 
-SANDBOX_DIR = Path(os.environ.get("AGENTIC_FILES_DIR", "workspace")).resolve()
 TIMEOUT_SECONDS = 15
 MAX_OUTPUT_CHARS = 20_000
 
@@ -22,11 +22,12 @@ def run_command(command: str):
     if not args:
         return {"error": "empty command"}
 
-    SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+    cwd = sandbox_dir()
+    cwd.mkdir(parents=True, exist_ok=True)
     try:
         proc = subprocess.run(
             args,
-            cwd=SANDBOX_DIR,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
@@ -52,7 +53,7 @@ def register(registry):
     registry.register("run_command", run_command, {
         "name": "run_command",
         "description": (
-            f"Run a shell command with its working directory set to {SANDBOX_DIR}. "
+            "Run a shell command in the working directory. "
             f"Not run through a shell interpreter. Times out after {TIMEOUT_SECONDS}s."
         ),
         "parameters": {

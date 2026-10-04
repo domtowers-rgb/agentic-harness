@@ -6,18 +6,13 @@ import json
 import pytest
 
 import plugins.file_ops as file_ops
-import plugins.pdf_document as pdf_document
-import plugins.powerpoint as powerpoint
-import plugins.word_document as word_document
 from agentic_harness import main as main_mod
 
 
 @pytest.fixture(autouse=True)
 def sandbox(tmp_path, monkeypatch):
-    # Each module imported SANDBOX_DIR by value, so each needs pointing at
-    # the temp dir (_resolve_safe itself reads file_ops' copy).
-    for module in (file_ops, pdf_document, powerpoint, word_document, main_mod):
-        monkeypatch.setattr(module, "SANDBOX_DIR", tmp_path)
+    # Every plugin and the server resolve paths via file_ops at call time.
+    monkeypatch.setattr(file_ops, "SANDBOX_DIR", tmp_path)
     return tmp_path
 
 
@@ -254,3 +249,132 @@ class TestCreatePdf:
         assert "error" in create_pdf("T", ["not an object"])
         assert "error" in create_pdf("T", [{"bullets": 5}])
         assert create_pdf("T", [], filename=".pdf")["path"] == "document.pdf"
+
+
+class _ScriptedModel:
+    """Plays back a list of chat responses in order, recording what the
+    tools wrote along the way."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+
+    def chat(self, messages, tools=None, **kwargs):
+        return self.responses.pop(0)
+
+
+class _CallThenCapture:
+    """Makes one tool call, then records the tool's result and answers."""
+
+    def __init__(self, name, arguments):
+        self.call = _tool_call(name, arguments)
+        self.tool_result = None
+
+    def chat(self, messages, tools=None, **kwargs):
+        if self.call:
+            call, self.call = self.call, None
+            return call
+        self.tool_result = json.loads(messages[-1]["content"])
+        return _answer()
+
+
+def _answer(text="ok"):
+    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+
+
+def _chat(client, monkeypatch, user, *responses, content="go"):
+    monkeypatch.setattr(main_mod, "model_impl", _ScriptedModel(*responses))
+    body = {"messages": [{"role": "user", "content": content}]}
+    if user is not None:
+        body["user"] = user
+    return client.post("/v1/chat/completions", json=body).json()
+
+
+class TestPerChatSandboxes:
+    def test_each_chat_gets_its_own_hashed_folder(self, sandbox):
+        a, b = file_ops.chat_sandbox("signal:+15551234567"), file_ops.chat_sandbox("signal:group:abc")
+        assert a.parent == b.parent == sandbox / "chats"
+        assert a != b
+        assert "5551234567" not in str(a)  # no phone numbers in folder names
+        assert file_ops.chat_sandbox(None) == file_ops.chat_sandbox("") == sandbox
+
+    def test_upload_goes_into_the_chats_own_folder(self, client, sandbox):
+        r = client.post("/v1/files", params={"filename": "secret.txt", "user": "signal:group:A"}, content=b"group A only")
+        assert r.json()["path"] == "uploads/secret.txt"
+        assert (file_ops.chat_sandbox("signal:group:A") / "uploads" / "secret.txt").read_bytes() == b"group A only"
+        assert not (sandbox / "uploads" / "secret.txt").exists()
+
+    def _tool_result_for(self, client, monkeypatch, user, name, arguments):
+        """Run one tool call as chat `user` (None = web UI) and return what
+        the tool gave back."""
+        model = _CallThenCapture(name, arguments)
+        monkeypatch.setattr(main_mod, "model_impl", model)
+        body = {"messages": [{"role": "user", "content": "go"}]}
+        if user:
+            body["user"] = user
+        client.post("/v1/chat/completions", json=body)
+        return model.tool_result
+
+    def test_another_chat_cannot_read_it(self, client, monkeypatch):
+        client.post("/v1/files", params={"filename": "secret.txt", "user": "signal:group:A"}, content=b"group A only")
+        args = {"path": "uploads/secret.txt"}
+        assert self._tool_result_for(client, monkeypatch, "signal:group:A", "read_document", args)["content"] == "group A only"
+        assert "no such file" in self._tool_result_for(client, monkeypatch, "signal:group:B", "read_document", args)["error"]
+        # The web UI works in the root, which has no uploads/ of its own.
+        assert "no such file" in self._tool_result_for(client, monkeypatch, None, "read_document", args)["error"]
+        # ...and read_file can't reach across either.
+        assert "error" in self._tool_result_for(client, monkeypatch, "signal:group:B", "read_file", {"path": "../" + file_ops.chat_sandbox("signal:group:A").name + "/uploads/secret.txt"})
+
+    def test_memory_is_separate_per_chat(self, client, monkeypatch):
+        self._tool_result_for(client, monkeypatch, "signal:+1555", "remember", {"key": "colour", "value": "blue"})
+        assert self._tool_result_for(client, monkeypatch, "signal:+1555", "recall", {"key": "colour"})["value"] == "blue"
+        other = self._tool_result_for(client, monkeypatch, "signal:+1666", "recall", {"key": "colour"})
+        assert other.get("value") != "blue"
+        web_ui = self._tool_result_for(client, monkeypatch, None, "recall", {"key": "colour"})
+        assert web_ui.get("value") != "blue"
+
+    def test_created_file_is_in_the_chat_folder_and_downloadable(self, client, monkeypatch):
+        body = _chat(client, monkeypatch, "signal:group:A", _tool_call("create_document", DOC_ARGS), _answer())
+        [attachment] = body["attachments"]
+        folder = file_ops.chat_sandbox("signal:group:A").name
+        assert attachment["path"] == "Worksheet.docx"
+        assert attachment["url"] == f"/v1/files/chats/{folder}/Worksheet.docx"
+        assert client.get(attachment["url"]).content[:2] == b"PK"
+
+    def test_web_ui_requests_still_use_the_root(self, client, monkeypatch, sandbox):
+        body = _chat(client, monkeypatch, None, _tool_call("create_document", DOC_ARGS), _answer())
+        assert body["attachments"][0]["url"] == "/v1/files/Worksheet.docx"
+        assert (sandbox / "Worksheet.docx").exists()
+
+    def test_bad_user_values_fall_back_to_the_root(self, client, monkeypatch):
+        for bad in (123, "   ", "x" * 300):
+            body = _chat(client, monkeypatch, bad, _tool_call("create_document", DOC_ARGS), _answer())
+            assert body["attachments"][0]["url"] == "/v1/files/Worksheet.docx"
+
+
+class TestRemadeDocuments:
+    def test_same_tool_and_title_keeps_only_the_latest(self, client, monkeypatch):
+        first = dict(DOC_ARGS, filename="draft")
+        second = dict(DOC_ARGS, filename="final")
+        body = _chat(client, monkeypatch, None,
+                     _tool_call("create_document", first), _tool_call("create_document", second), _answer())
+        assert [a["filename"] for a in body["attachments"]] == ["final.docx"]
+
+    def test_different_titles_are_all_kept(self, client, monkeypatch):
+        other = {"title": "Answers", "sections": []}
+        body = _chat(client, monkeypatch, None,
+                     _tool_call("create_document", DOC_ARGS), _tool_call("create_document", other), _answer())
+        assert [a["filename"] for a in body["attachments"]] == ["Worksheet.docx", "Answers.docx"]
+
+    def test_same_title_from_different_tools_are_both_kept(self, client, monkeypatch):
+        body = _chat(client, monkeypatch, None,
+                     _tool_call("create_document", DOC_ARGS), _tool_call("create_pdf", DOC_ARGS), _answer())
+        assert [a["filename"] for a in body["attachments"]] == ["Worksheet.docx", "Worksheet.pdf"]
+
+
+def test_images_count_as_a_fixed_size_in_history_trimming():
+    image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 2_000_000}}
+    message = {"role": "user", "content": [{"type": "text", "text": "what is this?"}, image]}
+    assert main_mod._content_chars(message) == len("what is this?") + main_mod.IMAGE_CHARS_ESTIMATE
+    older = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
+    # A big photo no longer pushes the rest of the conversation out.
+    assert main_mod._truncate_messages(older + [message], max_tokens=2048) == older + [message]

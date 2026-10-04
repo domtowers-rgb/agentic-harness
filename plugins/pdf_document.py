@@ -9,7 +9,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe, safe_output_name
+from plugins.file_ops import _resolve_safe, safe_output_name, sandbox_dir
 from plugins.word_document import DELIVERY_NOTE, MAX_ITEMS_PER_SECTION, MAX_SECTIONS, _as_text_list
 
 # reportlab's built-in fonts only cover Western European characters -
@@ -114,7 +114,7 @@ def create_pdf(title: str, sections: list, filename: str = None):
     except Exception as exc:
         return {"error": f"failed to create PDF: {exc}"}
 
-    path = str(target.relative_to(SANDBOX_DIR))
+    path = str(target.relative_to(sandbox_dir()))
     # "attachment" marks this as a file to hand back to the user - see
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "section_count": len(sections), "note": DELIVERY_NOTE}

@@ -1,6 +1,6 @@
 import json
 
-from plugins.file_ops import _resolve_safe, SANDBOX_DIR
+from plugins.file_ops import _resolve_safe
 
 MEMORY_FILE = "memory.json"
 MAX_ENTRIES = 200
@@ -56,7 +56,7 @@ def forget(key: str):
 def register(registry):
     registry.register("remember", remember, {
         "name": "remember",
-        "description": f"Save a small piece of information under a short key, persisted across conversations in {SANDBOX_DIR}.",
+        "description": "Save a small piece of information under a short key, persisted across conversations in this chat.",
         "parameters": {
             "type": "object",
             "properties": {

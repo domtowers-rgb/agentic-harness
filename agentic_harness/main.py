@@ -41,7 +41,7 @@ plugins.load_plugins()
 # The same sandbox the file plugins use - created files are served from,
 # and uploads saved into, it. Imported after load_plugins() so a broken
 # plugin elsewhere can't stop this one from loading first.
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe  # noqa: E402
+import plugins.file_ops as file_ops  # noqa: E402
 
 # choose model implementation based on env
 MODEL_BACKEND = os.environ.get("AGENTIC_MODEL", "mock")
@@ -83,13 +83,31 @@ def _load_personality(path: str) -> str:
 PERSONALITY = _load_personality(PERSONALITY_FILE)
 
 
+# What an image in a message counts as toward the history budget, in
+# characters (~4 per token, like everything else here). Vision models
+# typically spend a few hundred tokens on an image; counting its base64
+# data instead - often millions of characters - would make one photo push
+# the entire rest of the conversation out of the budget.
+IMAGE_CHARS_ESTIMATE = 1000
+
+
 def _content_chars(message: Dict[str, Any]) -> int:
     content = message.get("content")
     if content is None:
         return 0  # e.g. an assistant turn that only made tool calls
     if isinstance(content, str):
         return len(content)
-    return len(json.dumps(content, default=str))  # e.g. a list of content parts
+    if isinstance(content, list):  # content parts: text and/or images
+        total = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                total += len(part.get("text") or "")
+            elif isinstance(part, dict) and part.get("type") in ("image_url", "input_image", "image"):
+                total += IMAGE_CHARS_ESTIMATE
+            else:
+                total += len(json.dumps(part, default=str))
+        return total
+    return len(json.dumps(content, default=str))
 
 
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
@@ -175,38 +193,57 @@ def _call_tool(fname: str, args_text: Any):
         return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
 
 
-def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None) -> List[str]:
+def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None) -> List[tuple]:
     """Execute tool_calls via the plugin registry, appending the assistant and
     tool-result messages to `messages` in place. Blocking (plugins are plain
     sync functions, some doing network I/O) - callers run it in a thread.
+    File plugins work in `sandbox` (the request's chat folder; the root
+    sandbox if None) - see plugins/file_ops.py.
 
-    Returns the workspace paths of any files the tools created for the
-    user: a plugin marks one by including "attachment": <workspace-relative
-    path> in its result (create_presentation and create_document do).
-    Callers pass these on to the client - see _describe_attachments."""
+    Returns (key, path) for each file the tools created for the user: a
+    plugin marks one by including "attachment": <sandbox-relative path> in
+    its result (the document plugins do). Callers collect these with
+    _collect_attachments and pass them on - see _describe_attachments."""
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
     attachments = []
-    for tool_call in tool_calls:
-        fn = tool_call.get("function", {})
-        fname = fn.get("name")
-        args, result = _call_tool(fname, fn.get("arguments") or "{}")
-        _audit_log(fname, args, result)
-        messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
-        if isinstance(result, dict) and isinstance(result.get("attachment"), str):
-            attachments.append(result["attachment"])
+    with file_ops.using_sandbox(sandbox or file_ops.SANDBOX_DIR):
+        for tool_call in tool_calls:
+            fn = tool_call.get("function", {})
+            fname = fn.get("name")
+            args, result = _call_tool(fname, fn.get("arguments") or "{}")
+            _audit_log(fname, args, result)
+            messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
+            if isinstance(result, dict) and isinstance(result.get("attachment"), str):
+                path = result["attachment"]
+                # Same tool + same title = the same document, remade: seen
+                # live, a model built a presentation, then rebuilt it under
+                # a new filename in the same request, and both got sent.
+                # Different titles are different documents, and all kept.
+                title = args.get("title") if isinstance(args, dict) else None
+                attachments.append(((fname, title) if title else (fname, path), path))
     return attachments
 
 
-def _describe_attachments(paths: List[str]) -> List[Dict[str, Any]]:
+def _collect_attachments(collected: Dict[tuple, str], new: List[tuple]) -> None:
+    """Add _run_tool_calls' results to `collected`, a later version of a
+    document replacing the earlier one (moving to the end, so files keep
+    the order they were finished in)."""
+    for key, path in new:
+        collected.pop(key, None)
+        collected[key] = path
+
+
+def _describe_attachments(paths, sandbox=None) -> List[Dict[str, Any]]:
     """What the client gets for each created file: enough to show it and
-    download it from GET /v1/files/{path}. A path created twice in one
-    request (the model regenerating a file) is listed once; one that no
-    longer exists is dropped."""
+    download it. `path` is relative to the chat's sandbox (what the model
+    sees); `url` is GET /v1/files/ + its path from the root sandbox. A path
+    listed twice is listed once; one that no longer exists is dropped."""
+    sandbox = sandbox or file_ops.SANDBOX_DIR
     described = []
     for path in dict.fromkeys(paths):
         try:
-            target = _resolve_safe(path)
+            target = file_ops.resolve_in(sandbox, path)
         except ValueError:
             continue
         if not target.is_file():
@@ -214,11 +251,20 @@ def _describe_attachments(paths: List[str]) -> List[Dict[str, Any]]:
         described.append({
             "filename": target.name,
             "path": path,
-            "url": f"/v1/files/{path}",
+            "url": f"/v1/files/{target.relative_to(file_ops.SANDBOX_DIR).as_posix()}",
             "size": target.stat().st_size,
             "content_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
         })
     return described
+
+
+def _chat_id(value) -> str:
+    """The client's chat id - the standard "user" field of a chat request,
+    or ?user= on an upload - or None. agentic-gateway sends one per Signal
+    chat; the web UI sends none."""
+    if isinstance(value, str) and value.strip() and len(value) <= 256:
+        return value.strip()
+    return None
 
 
 # Appended once MAX_TOOL_ITERATIONS is used up, for one last round with
@@ -324,7 +370,7 @@ def _safe_upload_name(filename: str) -> str:
 
 
 @app.post("/v1/files")
-async def upload_file(request: Request, filename: str = ""):
+async def upload_file(request: Request, filename: str = "", user: str = ""):
     """Save the raw request body as a file in the sandbox's uploads/ folder
     and return its workspace path. Raw body + ?filename= rather than a
     multipart form, to avoid an extra dependency (python-multipart) for a
@@ -337,16 +383,19 @@ async def upload_file(request: Request, filename: str = ""):
     if len(body) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
 
+    # Into the uploading chat's own sandbox (?user=, same id as its chat
+    # requests send), so only that chat's tools can read it.
+    sandbox = file_ops.chat_sandbox(_chat_id(user))
     name = _safe_upload_name(filename)
     stem, ext = os.path.splitext(name)
-    target = _resolve_safe(os.path.join(UPLOAD_DIR, name))
+    target = file_ops.resolve_in(sandbox, os.path.join(UPLOAD_DIR, name))
     counter = 1
     while target.exists():
         counter += 1
-        target = _resolve_safe(os.path.join(UPLOAD_DIR, f"{stem}-{counter}{ext}"))
+        target = file_ops.resolve_in(sandbox, os.path.join(UPLOAD_DIR, f"{stem}-{counter}{ext}"))
     target.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(target.write_bytes, body)
-    path = str(target.relative_to(SANDBOX_DIR))
+    path = target.relative_to(sandbox).as_posix()
     return JSONResponse(content={"path": path, "filename": target.name, "size": len(body)})
 
 
@@ -358,7 +407,7 @@ async def download_file(path: str):
     themselves: anything that can reach this server could already ask
     read_file for the same content."""
     try:
-        target = _resolve_safe(path)
+        target = file_ops.resolve_in(file_ops.SANDBOX_DIR, path)
     except ValueError:
         raise HTTPException(status_code=404, detail="not found")
     if not target.is_file():
@@ -418,6 +467,9 @@ async def chat_completions(request: Request):
     tools = list(body.get("tools") or [])
     stream = body.get("stream", False)
     model_name = body.get("model")
+    # Which chat this is for (the standard "user" field) - its file tools,
+    # uploads and memory live in that chat's own sandbox.
+    sandbox = file_ops.chat_sandbox(_chat_id(body.get("user")))
     temperature = body.get("temperature", 0.0)
     # `.get(..., DEFAULT_MAX_TOKENS)` alone wouldn't fall back if a client
     # sent an explicit `"max_tokens": null` - that key would still be
@@ -458,7 +510,7 @@ async def chat_completions(request: Request):
             # in the same SSE response - repeating until a plain response comes
             # back or the iteration cap is hit.
             iterations = 0
-            attachment_paths = []
+            attachment_paths = {}
             while True:
                 tool_call_accum = {}
                 final_round = iterations >= MAX_TOOL_ITERATIONS
@@ -509,10 +561,10 @@ async def chat_completions(request: Request):
                     }
                     for idx, slot in sorted(tool_call_accum.items())
                 ]
-                attachment_paths += await asyncio.to_thread(_run_tool_calls, messages, tool_calls)
+                _collect_attachments(attachment_paths, await asyncio.to_thread(_run_tool_calls, messages, tool_calls, None, sandbox))
                 iterations += 1
 
-            attachments = _describe_attachments(attachment_paths)
+            attachments = _describe_attachments(attachment_paths.values(), sandbox)
             if attachments:
                 # Not a standard chat-completion chunk - an extra event
                 # (no "choices") that clients unaware of it just skip.
@@ -530,7 +582,7 @@ async def chat_completions(request: Request):
     # other request.
     resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
     iterations = 0
-    attachment_paths = []
+    attachment_paths = {}
     while True:
         message = resp["choices"][0].get("message") or {}
         tool_calls = message.get("tool_calls")
@@ -548,14 +600,14 @@ async def chat_completions(request: Request):
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        attachment_paths += await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"))
+        _collect_attachments(attachment_paths, await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"), sandbox))
         resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
         iterations += 1
 
     # Files created by tools this request, as an extra top-level field
     # alongside the standard ones - OpenAI-compatible clients ignore it;
     # agentic-gateway downloads and sends them on.
-    attachments = _describe_attachments(attachment_paths)
+    attachments = _describe_attachments(attachment_paths.values(), sandbox)
     if attachments:
         resp["attachments"] = attachments
     return JSONResponse(content=resp)

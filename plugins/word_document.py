@@ -1,6 +1,6 @@
 from docx import Document
 
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe, safe_output_name
+from plugins.file_ops import _resolve_safe, safe_output_name, sandbox_dir
 
 MAX_SECTIONS = 100
 MAX_ITEMS_PER_SECTION = 200
@@ -64,7 +64,7 @@ def create_document(title: str, sections: list, filename: str = None):
     except Exception as exc:
         return {"error": f"failed to create document: {exc}"}
 
-    path = str(target.relative_to(SANDBOX_DIR))
+    path = str(target.relative_to(sandbox_dir()))
     # "attachment" marks this as a file to hand back to the user - see
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "section_count": len(sections), "note": DELIVERY_NOTE}
