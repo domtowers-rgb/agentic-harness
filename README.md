@@ -36,7 +36,16 @@ python -m agentic_harness.main
 
 3. Use the OpenAI-compatible endpoint at `http://127.0.0.1:8000/v1/chat/completions`, or open `http://127.0.0.1:8000/` in a browser for a minimal built-in chat UI - it renders assistant markdown (code blocks, lists, bold/italic, links) and saves conversations to your browser's local storage (per-browser, not synced anywhere), listed in the sidebar and restored automatically when you reopen the page.
 
-Environment
+Configuration
+
+Settings are read from a `.env` file in the project folder at startup, so nothing needs exporting first and the LM Studio connection survives a restart:
+
+```bash
+cp .env.example .env    # then edit .env
+```
+
+`.env.example` lists every setting with its default; `.env` itself is gitignored, so API keys in it stay on this machine. One `KEY=VALUE` per line, `#` for comments. A variable set in the real environment still wins over the file (handy for a one-off, e.g. `PORT=8001 python -m agentic_harness.main`), and `AGENTIC_ENV_FILE` points at a different file. The settings:
+
 
 - `AGENTIC_MODEL`: `mock` (default) or `openai` to use an OpenAI-compatible API.
 - `OPENAI_API_KEY`: used if set; otherwise falls back to a placeholder value, which works fine for local servers that don't check it. Set a real key to use the actual OpenAI API.
@@ -63,15 +72,15 @@ being unreachable at all) still comes back as a plain `502`. Not covered:
 the streaming path, whose errors surface inside an already-started SSE
 response - the web UI is the only caller of that path today.
 
-Using a local model (e.g. LM Studio, Ollama, llama.cpp server)
+Using a local model (e.g. LM Studio, Ollama, llama.cpp server) - in `.env`:
 
 ```bash
-export AGENTIC_MODEL=openai
-export OPENAI_BASE_URL=http://127.0.0.1:1234/v1
-export OPENAI_API_KEY=local
-export AGENTIC_DEFAULT_MODEL=google/gemma-4-12b-qat
-python -m agentic_harness.main
+AGENTIC_MODEL=openai
+OPENAI_BASE_URL=http://127.0.0.1:1234/v1
+AGENTIC_DEFAULT_MODEL=google/gemma-4-12b-qat
 ```
+
+then `python -m agentic_harness.main`.
 
 Plugins
 

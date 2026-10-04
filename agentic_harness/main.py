@@ -1,3 +1,10 @@
+# Settings from .env, loaded before anything below (or a plugin/channel)
+# reads them. Only when started as the service - never when imported by
+# the tests, which must not pick up someone's real .env.
+if __name__ == "__main__":
+    from agentic_harness.config import load_env_file
+    load_env_file()
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
