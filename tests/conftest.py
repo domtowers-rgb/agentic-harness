@@ -27,4 +27,6 @@ def client():
     """A TestClient against the real app, running whatever backend main.py
     currently has installed (MockModel by default - no AGENTIC_MODEL=openai
     is set in the test environment)."""
-    return TestClient(main_mod.app)
+    # Addressed to 127.0.0.1 like a real local client - the server refuses
+    # other Host names (TestClient's default is "testserver").
+    return TestClient(main_mod.app, base_url="http://127.0.0.1")

@@ -8,6 +8,7 @@ if __name__ == "__main__":
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 import uvicorn
 from . import model, plugins
 import os
@@ -16,10 +17,43 @@ import json
 import asyncio
 import mimetypes
 import queue
+import threading
+from contextlib import aclosing
 from datetime import datetime, timezone
 from typing import List, Dict, Any, AsyncIterator, Iterator
+from urllib.parse import urlparse
 
 app = FastAPI(title="Agentic LLM Harness")
+
+# The server only listens on this machine - but the user's web browser is
+# on this machine too, and would otherwise let any website they visit talk
+# to it: a "simple" cross-site POST (Content-Type text/plain, no preflight)
+# could repoint /v1/connect at the attacker's own server - sending every
+# later conversation there - or plant files; and a DNS-rebinding site
+# (its own hostname resolving to 127.0.0.1) could read responses outright,
+# workspace files included. Both confirmed against this server before the
+# checks below were added. Two checks close them:
+#   - the Host header must name this machine (defeats DNS rebinding);
+#   - a request carrying an Origin header - which browsers add to
+#     cross-site and same-site POSTs alike, unlike non-browser clients
+#     such as agentic-gateway - must come from one of those same hosts.
+# AGENTIC_ALLOWED_HOSTS adds more hostnames (comma-separated), e.g. if the
+# server is reached by a LAN name.
+ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]", "::1"] + [
+    h.strip() for h in os.environ.get("AGENTIC_ALLOWED_HOSTS", "").split(",") if h.strip()
+]
+
+
+@app.middleware("http")
+async def reject_cross_site_requests(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if origin is not None and (urlparse(origin).hostname or "") not in ALLOWED_HOSTS:
+        return JSONResponse(status_code=403, content={"detail": "cross-site request refused"})
+    return await call_next(request)
+
+
+# Added last so it runs first.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "8"))
 
@@ -183,12 +217,18 @@ def _call_tool(fname: str, args_text: Any):
     plugin = plugins.registry.get(fname)
     if not plugin:
         return args, {"error": f"unknown function: {fname}"}
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return args, {"error": "arguments must be a JSON object of named parameters"}
 
+    # Called exactly once. (It used to be retried with the arguments as a
+    # single dict on any TypeError - but a TypeError can come from inside
+    # the plugin after it has already written a file or saved a memory,
+    # and the retry then did it twice.) A wrong or missing argument name
+    # comes back to the model as a TypeError message it can act on.
     try:
-        try:
-            return args, plugin["callable"](**(args or {}))
-        except TypeError:
-            return args, plugin["callable"](args)
+        return args, plugin["callable"](**args)
     except Exception as exc:
         return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
 
@@ -296,28 +336,46 @@ def _tool_limit_fallback() -> str:
 async def _iter_in_thread(sync_iterable: Iterator[Dict]) -> AsyncIterator[Dict]:
     """Consume a blocking iterator (e.g. a model's HTTP-streaming generator) in a
     background thread, so a slow local model doesn't block the event loop while
-    other requests are in flight."""
+    other requests are in flight.
+
+    If the consumer stops early - the client disconnected, e.g. the web UI's
+    Stop button - the worker stops at the next item and closes the iterator,
+    which closes the model server connection and so ends the generation.
+    Before, the worker kept reading until the model finished on its own,
+    keeping the GPU busy on a reply nobody would see."""
     q = queue.Queue()
     DONE = object()
+    stop = threading.Event()
 
     def worker():
         try:
             for item in sync_iterable:
+                if stop.is_set():
+                    break
                 q.put(item)
         except Exception as exc:
             q.put(exc)
         finally:
+            close = getattr(sync_iterable, "close", None)
+            if close:
+                try:
+                    close()
+                except Exception:
+                    pass
             q.put(DONE)
 
-    asyncio.get_event_loop().run_in_executor(None, worker)
+    asyncio.get_running_loop().run_in_executor(None, worker)
 
-    while True:
-        item = await asyncio.to_thread(q.get)
-        if item is DONE:
-            break
-        if isinstance(item, Exception):
-            raise item
-        yield item
+    try:
+        while True:
+            item = await asyncio.to_thread(q.get)
+            if item is DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
 
 
 async def _call_model(**kwargs) -> Dict:
@@ -522,28 +580,31 @@ async def chat_completions(request: Request):
                     messages=messages, tools=tools, tool_choice="none" if final_round else "auto",
                     model=model_name, temperature=temperature, max_tokens=max_tokens,
                 )
-                async for chunk in _iter_in_thread(stream_iter):
-                    try:
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    except Exception:
-                        # fallback to str
-                        yield f"data: {str(chunk)}\n\n"
-                        continue
+                # aclosing: if the client goes away mid-stream (the web UI's Stop
+                # button), close the model stream right away - see _iter_in_thread.
+                async with aclosing(_iter_in_thread(stream_iter)) as chunks:
+                    async for chunk in chunks:
+                        try:
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                        except Exception:
+                            # fallback to str
+                            yield f"data: {str(chunk)}\n\n"
+                            continue
 
-                    choices = chunk.get("choices") or []
-                    delta = (choices[0].get("delta") or {}) if choices else {}
-                    if delta.get("content"):
-                        got_content = True
-                    for tc_delta in delta.get("tool_calls") or []:
-                        idx = tc_delta.get("index", 0)
-                        slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
-                        if tc_delta.get("id"):
-                            slot["id"] = tc_delta["id"]
-                        fn = tc_delta.get("function") or {}
-                        if fn.get("name"):
-                            slot["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            slot["arguments"] += fn["arguments"]
+                        choices = chunk.get("choices") or []
+                        delta = (choices[0].get("delta") or {}) if choices else {}
+                        if delta.get("content"):
+                            got_content = True
+                        for tc_delta in delta.get("tool_calls") or []:
+                            idx = tc_delta.get("index", 0)
+                            slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                            if tc_delta.get("id"):
+                                slot["id"] = tc_delta["id"]
+                            fn = tc_delta.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                slot["arguments"] += fn["arguments"]
 
                 if final_round:
                     if not got_content:

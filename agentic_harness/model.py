@@ -56,8 +56,12 @@ class OpenAIModel(BaseModel):
             params["tools"] = tools
             params["tool_choice"] = kwargs.get("tool_choice", "auto")
 
-        for event in self._client.chat.completions.create(stream=True, **params):
-            yield event.model_dump()
+        # As a context manager, so closing this generator early (see
+        # _iter_in_thread) closes the HTTP response too - which is what tells
+        # the model server to stop generating.
+        with self._client.chat.completions.create(stream=True, **params) as stream:
+            for event in stream:
+                yield event.model_dump()
 
     def list_models(self) -> List[str]:
         resp = self._client.models.list()

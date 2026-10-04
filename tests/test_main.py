@@ -676,3 +676,100 @@ def test_streaming_unknown_tool_is_reported_back_and_continues(client, monkeypat
 
     assert "unknown function: nope" in lines[-2]
     assert lines[-1] == "data: [DONE]"
+
+
+def test_a_tool_is_never_run_twice(client, monkeypatch):
+    runs = []
+
+    def half_done(**kwargs):
+        runs.append(kwargs)
+        raise TypeError("bug inside the plugin, after a side effect")
+
+    monkeypatch.setitem(main_mod.plugins.registry._registry, "half_done", {"callable": half_done, "spec": None})
+    fake = ScriptedModel(_tool_call_response("half_done", arguments='{"x": 1}'), _text_response("ok"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+
+    assert runs == [{"x": 1}]
+    assert "TypeError" in _last_tool_result(fake.calls[1])["error"]
+
+
+def test_wrong_argument_names_come_back_as_an_error(client, monkeypatch):
+    fake = ScriptedModel(_tool_call_response("hello", arguments='{"nmae": "typo"}'), _text_response("ok"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+    assert "unexpected keyword argument 'nmae'" in _last_tool_result(fake.calls[1])["error"]
+
+
+def test_non_object_arguments_are_refused(client, monkeypatch):
+    fake = ScriptedModel(_tool_call_response("hello", arguments='["a", "list"]'), _text_response("ok"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
+    assert "JSON object" in _last_tool_result(fake.calls[1])["error"]
+
+
+class TestCrossSiteProtection:
+    def test_local_requests_and_same_origin_web_ui_are_allowed(self, client):
+        assert client.get("/v1/status").status_code == 200
+        assert client.get("/v1/status", headers={"Origin": "http://127.0.0.1:8000"}).status_code == 200
+        assert client.get("/v1/status", headers={"Origin": "http://localhost:8000"}).status_code == 200
+
+    def test_cross_site_requests_are_refused(self, client):
+        for origin in ("https://evil.example", "null", "http://127.0.0.1.evil.example"):
+            r = client.post("/v1/connect", headers={"Origin": origin, "Content-Type": "text/plain"},
+                            content='{"base_url": "http://evil.example/v1"}')
+            assert r.status_code == 403, origin
+        assert client.get("/v1/status").json()["base_url"] != "http://evil.example/v1"
+
+    def test_cross_site_upload_is_refused(self, client, tmp_path, monkeypatch):
+        import plugins.file_ops as file_ops
+        monkeypatch.setattr(file_ops, "SANDBOX_DIR", tmp_path)
+        r = client.post("/v1/files", params={"filename": "x.txt"}, headers={"Origin": "https://evil.example"}, content=b"x")
+        assert r.status_code == 403
+        assert not (tmp_path / "uploads").exists()
+
+    def test_dns_rebinding_host_is_refused(self):
+        from fastapi.testclient import TestClient
+        rebinding = TestClient(main_mod.app, base_url="http://evil.example:8000")
+        assert rebinding.get("/v1/status").status_code == 400
+
+    def test_extra_hosts_can_be_allowed(self, monkeypatch):
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(main_mod, "ALLOWED_HOSTS", main_mod.ALLOWED_HOSTS + ["harness.lan"])
+        # The Origin check reads ALLOWED_HOSTS live; the Host check was
+        # configured at startup, so only the former is exercised here.
+        local = TestClient(main_mod.app, base_url="http://127.0.0.1")
+        assert local.get("/v1/status", headers={"Origin": "http://harness.lan:8000"}).status_code == 200
+
+
+def test_stopping_a_stream_early_closes_the_model_stream():
+    """When the consumer goes away (client disconnected), the model stream
+    must be closed promptly - not read to the end in the background."""
+    import asyncio
+    import threading
+    import time
+
+    produced, closed = [], threading.Event()
+
+    def slow_model_stream():
+        try:
+            for i in range(1000):
+                time.sleep(0.01)
+                produced.append(i)
+                yield {"n": i}
+        finally:
+            closed.set()
+
+    async def consume_two_then_stop():
+        from contextlib import aclosing
+        async with aclosing(main_mod._iter_in_thread(slow_model_stream())) as chunks:
+            got = []
+            async for chunk in chunks:
+                got.append(chunk["n"])
+                if len(got) == 2:
+                    break
+            return got
+
+    assert asyncio.run(consume_two_then_stop()) == [0, 1]
+    assert closed.wait(2), "model stream was never closed"
+    assert len(produced) < 10  # stopped within a few items, not all 1000

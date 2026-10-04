@@ -56,6 +56,7 @@ cp .env.example .env    # then edit .env
 - `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep (an image in a message counts as about 250 tokens, not its data size), in the same rough chars/4 heuristic `_truncate_messages` uses (default `2048`). Tune this to roughly match your local model's actual configured context window. Oldest messages are dropped first, but the newest message is always kept even if it's over budget on its own (a long paste is sent rather than silently dropped), as is a leading system message.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is prepended as a system message on every request that doesn't already supply its own - your own system message always wins over it. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
+- `AGENTIC_ALLOWED_HOSTS`: extra hostnames the server answers to, comma-separated (see "Browser protection").
 - `AGENTIC_AUDIT_LOG`: path to the tool-call audit log (default `audit.log`). See "Audit log" below.
 
 **If the requested model isn't loaded on the backend** (e.g. `AGENTIC_DEFAULT_MODEL` names a model that isn't actually running in LM Studio), `/v1/chat/completions` (non-streaming only) returns `404` with a machine-readable body instead of an opaque `500`:
@@ -114,6 +115,10 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_READ_MAX_CHARS`: how much text `read_document` returns per call (default `8000`).
 - `AGENTIC_MAX_UPLOAD_BYTES`: largest file `POST /v1/files` accepts (default 25 MB).
 - `AGENTIC_FETCH_MAX_CHARS`: max characters of page text `fetch_url` returns (default `8000`, applied after HTML-to-text conversion). The whole result goes into the model's context, so keep it well inside your model's window.
+
+Browser protection
+
+The server listens on 127.0.0.1 only, but your web browser runs on the same machine - so without care, any website you visit could talk to it: a cross-site POST could repoint `/v1/connect` at an attacker's server (sending every later conversation there) or plant files, and a DNS-rebinding site could read responses, workspace files included. So requests must be addressed to `127.0.0.1`/`localhost` (Starlette's `TrustedHostMiddleware`), and any request carrying a browser `Origin` header must come from one of those same hosts. The built-in web UI and non-browser clients like agentic-gateway are unaffected. If you reach the server by another name, add it to `AGENTIC_ALLOWED_HOSTS`.
 
 Separate chats
 
