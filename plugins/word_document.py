@@ -1,8 +1,6 @@
-import re
-
 from docx import Document
 
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe
+from plugins.file_ops import SANDBOX_DIR, _resolve_safe, safe_output_name
 
 MAX_SECTIONS = 100
 MAX_ITEMS_PER_SECTION = 200
@@ -15,12 +13,7 @@ DELIVERY_NOTE = "This file is sent to the user automatically as an attachment - 
 
 
 def _sanitize_filename(name: str) -> str:
-    # Drop the extension *before* stripping unsafe characters - otherwise
-    # its dot goes and "notes.docx" becomes "notesdocx.docx".
-    if name.lower().endswith(".docx"):
-        name = name[:-5]
-    name = re.sub(r"[^A-Za-z0-9 _-]", "", name).strip().replace(" ", "_")
-    return (name[:80] or "document") + ".docx"
+    return safe_output_name(name, ".docx", "document")
 
 
 def _as_text_list(value, what: str, index: int):

@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 SANDBOX_DIR = Path(os.environ.get("AGENTIC_FILES_DIR", "workspace")).resolve()
@@ -6,6 +7,19 @@ SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_READ_CHARS = 200_000
 MAX_WRITE_CHARS = 200_000
+
+
+def safe_output_name(name: str, extension: str, default: str) -> str:
+    """A safe filename for a file a plugin creates: letters, digits,
+    spaces (as underscores), _ and - only, at most 80 characters, ending
+    in `extension` (e.g. ".pdf"). The extension is dropped *before*
+    stripping unsafe characters - otherwise its dot goes too, and
+    "notes.pdf" becomes "notespdf.pdf"."""
+    name = name or ""
+    if name.lower().endswith(extension):
+        name = name[:-len(extension)]
+    name = re.sub(r"[^A-Za-z0-9 _-]", "", name).strip().replace(" ", "_")
+    return (name[:80] or default) + extension
 
 
 def _resolve_safe(path: str) -> Path:

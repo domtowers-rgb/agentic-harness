@@ -92,6 +92,7 @@ Built-in plugins:
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
 - `create_presentation` - creates a PowerPoint (.pptx) file in the same sandboxed directory: a title slide plus one title+bullets slide per entry you give it. Sent to the user as a file (see "Files in and out").
 - `create_document` - creates a Word (.docx) document in the same directory: a title, then per section an optional heading, paragraphs and bullet points. Also sent to the user as a file.
+- `create_pdf` - creates an A4 PDF in the same directory, from the same title + sections shape as `create_document` (`**bold**` supported), with page numbers. Uses DejaVu Sans (or Arial on Windows) when installed, so Greek, symbols and the like render properly; otherwise falls back to Helvetica, which covers Western European text only. Sent to the user as a file.
 - `read_document` - reads the text of a PDF, Word (.docx), PowerPoint (.pptx) or plain-text file in the same directory, including files the user has sent. Long documents come back `AGENTIC_READ_MAX_CHARS` (default `8000`) at a time; the result's `next_start` says where to continue. Scanned PDFs (images of text) have no extractable text.
 - `remember` / `recall` / `forget` - a small persistent key-value notes store (in `memory.json` in the same sandboxed directory), so the model can save and retrieve small facts across separate conversations, not just within one.
 - `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
@@ -107,7 +108,7 @@ Additional environment variables used by the built-in plugins:
 
 Files in and out
 
-- **Out:** a plugin marks a file it created for the user by including `"attachment": "<path in the sandbox>"` in its result (`create_presentation` and `create_document` do; `write_file` doesn't - it's for the model's own working files). Every file marked during a request is listed in the response as an extra top-level field, which OpenAI-compatible clients simply ignore:
+- **Out:** a plugin marks a file it created for the user by including `"attachment": "<path in the sandbox>"` in its result (`create_presentation`, `create_document` and `create_pdf` do; `write_file` doesn't - it's for the model's own working files). Every file marked during a request is listed in the response as an extra top-level field, which OpenAI-compatible clients simply ignore:
 
   ```json
   "attachments": [{"filename": "deck.pptx", "path": "deck.pptx", "url": "/v1/files/deck.pptx", "size": 30880, "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}]

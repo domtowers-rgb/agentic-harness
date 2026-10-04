@@ -6,3 +6,4 @@ tzdata
 python-pptx
 pypdf
 python-docx
+reportlab

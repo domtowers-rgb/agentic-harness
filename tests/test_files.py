@@ -6,6 +6,7 @@ import json
 import pytest
 
 import plugins.file_ops as file_ops
+import plugins.pdf_document as pdf_document
 import plugins.powerpoint as powerpoint
 import plugins.word_document as word_document
 from agentic_harness import main as main_mod
@@ -15,7 +16,7 @@ from agentic_harness import main as main_mod
 def sandbox(tmp_path, monkeypatch):
     # Each module imported SANDBOX_DIR by value, so each needs pointing at
     # the temp dir (_resolve_safe itself reads file_ops' copy).
-    for module in (file_ops, powerpoint, word_document, main_mod):
+    for module in (file_ops, pdf_document, powerpoint, word_document, main_mod):
         monkeypatch.setattr(module, "SANDBOX_DIR", tmp_path)
     return tmp_path
 
@@ -212,3 +213,44 @@ class TestReadDocument:
         from plugins.read_document import read_document
         (sandbox / "broken.docx").write_bytes(b"not a zip")
         assert "couldn't read" in read_document("broken.docx")["error"]
+
+
+class TestCreatePdf:
+    def test_creates_a_pdf_that_reads_back_exactly(self, sandbox):
+        from plugins.pdf_document import create_pdf
+        from plugins.read_document import read_document
+
+        result = create_pdf("Trip – Info", [
+            {"heading": "Details", "paragraphs": ["Cost: **£5** & lunch. Ask “Sir” <trips@school>."], "bullets": ["Coat", "Pen"]},
+            {"paragraphs": "6CO₂ → C₆H₁₂O₆, π ≈ 3.14"},
+        ], filename="trip info.pdf")
+
+        assert result["path"] == result["attachment"] == "trip_info.pdf"
+        assert "sent to the user automatically" in result["note"]
+        assert (sandbox / "trip_info.pdf").read_bytes()[:5] == b"%PDF-"
+        content = read_document("trip_info.pdf")["content"]
+        # Markup characters are escaped, not parsed; **bold** markers removed.
+        for expected in ("Trip – Info", "Cost: £5 & lunch. Ask “Sir” <trips@school>.", "Coat", "6CO₂ → C₆H₁₂O₆, π ≈ 3.14", "Page 1"):
+            assert expected in content
+        assert "**" not in content
+
+    def test_long_content_flows_onto_more_pages(self, sandbox):
+        from plugins.pdf_document import create_pdf
+        from plugins.read_document import read_document
+
+        create_pdf("Long", [{"paragraphs": ["word " * 400] * 10}], filename="long")
+        assert "--- page 2 ---" in read_document("long.pdf")["content"]
+
+    def test_is_listed_as_an_attachment_in_responses(self, client, monkeypatch):
+        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_pdf", DOC_ARGS))
+        r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "make a pdf"}]})
+        [attachment] = r.json()["attachments"]
+        assert (attachment["filename"], attachment["content_type"]) == ("Worksheet.pdf", "application/pdf")
+
+    def test_validates_input(self):
+        from plugins.pdf_document import create_pdf
+        assert "error" in create_pdf("", [])
+        assert "error" in create_pdf("T", "not a list")
+        assert "error" in create_pdf("T", ["not an object"])
+        assert "error" in create_pdf("T", [{"bullets": 5}])
+        assert create_pdf("T", [], filename=".pdf")["path"] == "document.pdf"

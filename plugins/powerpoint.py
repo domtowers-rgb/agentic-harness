@@ -1,8 +1,6 @@
-import re
-
 from pptx import Presentation
 
-from plugins.file_ops import SANDBOX_DIR, _resolve_safe
+from plugins.file_ops import SANDBOX_DIR, _resolve_safe, safe_output_name
 from plugins.word_document import DELIVERY_NOTE
 
 MAX_SLIDES = 100
@@ -10,12 +8,7 @@ MAX_BULLETS_PER_SLIDE = 50
 
 
 def _sanitize_filename(name: str) -> str:
-    # Drop the extension *before* stripping unsafe characters - otherwise
-    # its dot goes and "notes.pptx" becomes "notespptx.pptx".
-    if name.lower().endswith(".pptx"):
-        name = name[:-5]
-    name = re.sub(r"[^A-Za-z0-9 _-]", "", name).strip().replace(" ", "_")
-    return (name[:80] or "presentation") + ".pptx"
+    return safe_output_name(name, ".pptx", "presentation")
 
 
 def create_presentation(title: str, slides: list, subtitle: str = None, filename: str = None):
