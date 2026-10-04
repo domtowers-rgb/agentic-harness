@@ -104,12 +104,12 @@ class _TwoStepModel:
             yield {"choices": [{"delta": {"content": message["content"]}}]}
 
 
-DOC_ARGS = {"title": "Worksheet", "sections": [{"heading": "Q1", "paragraphs": ["What is 2+2?"]}]}
+DOC_ARGS = {"format": "docx", "title": "Worksheet", "sections": [{"heading": "Q1", "paragraphs": ["What is 2+2?"]}]}
 
 
 class TestAttachmentsInResponses:
     def test_created_file_is_listed_in_the_response(self, client, monkeypatch):
-        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_document", DOC_ARGS))
+        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_file", DOC_ARGS))
         r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "make a worksheet"}]})
 
         body = r.json()
@@ -126,7 +126,7 @@ class TestAttachmentsInResponses:
         assert "attachments" not in r.json()
 
     def test_streaming_sends_an_attachments_event_before_done(self, client, monkeypatch):
-        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_document", DOC_ARGS))
+        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_file", DOC_ARGS))
         with client.stream("POST", "/v1/chat/completions", json={
             "messages": [{"role": "user", "content": "make a worksheet"}], "stream": True,
         }) as r:
@@ -237,7 +237,7 @@ class TestCreatePdf:
         assert "--- page 2 ---" in read_document("long.pdf")["content"]
 
     def test_is_listed_as_an_attachment_in_responses(self, client, monkeypatch):
-        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_pdf", DOC_ARGS))
+        monkeypatch.setattr(main_mod, "model_impl", _TwoStepModel("create_file", dict(DOC_ARGS, format="pdf")))
         r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "make a pdf"}]})
         [attachment] = r.json()["attachments"]
         assert (attachment["filename"], attachment["content_type"]) == ("Worksheet.pdf", "application/pdf")
@@ -333,7 +333,7 @@ class TestPerChatSandboxes:
         assert web_ui.get("value") != "blue"
 
     def test_created_file_is_in_the_chat_folder_and_downloadable(self, client, monkeypatch):
-        body = _chat(client, monkeypatch, "signal:group:A", _tool_call("create_document", DOC_ARGS), _answer())
+        body = _chat(client, monkeypatch, "signal:group:A", _tool_call("create_file", DOC_ARGS), _answer())
         [attachment] = body["attachments"]
         folder = file_ops.chat_sandbox("signal:group:A").name
         assert attachment["path"] == "Worksheet.docx"
@@ -341,13 +341,13 @@ class TestPerChatSandboxes:
         assert client.get(attachment["url"]).content[:2] == b"PK"
 
     def test_web_ui_requests_still_use_the_root(self, client, monkeypatch, sandbox):
-        body = _chat(client, monkeypatch, None, _tool_call("create_document", DOC_ARGS), _answer())
+        body = _chat(client, monkeypatch, None, _tool_call("create_file", DOC_ARGS), _answer())
         assert body["attachments"][0]["url"] == "/v1/files/Worksheet.docx"
         assert (sandbox / "Worksheet.docx").exists()
 
     def test_bad_user_values_fall_back_to_the_root(self, client, monkeypatch):
         for bad in (123, "   ", "x" * 300):
-            body = _chat(client, monkeypatch, bad, _tool_call("create_document", DOC_ARGS), _answer())
+            body = _chat(client, monkeypatch, bad, _tool_call("create_file", DOC_ARGS), _answer())
             assert body["attachments"][0]["url"] == "/v1/files/Worksheet.docx"
 
 
@@ -356,18 +356,18 @@ class TestRemadeDocuments:
         first = dict(DOC_ARGS, filename="draft")
         second = dict(DOC_ARGS, filename="final")
         body = _chat(client, monkeypatch, None,
-                     _tool_call("create_document", first), _tool_call("create_document", second), _answer())
+                     _tool_call("create_file", first), _tool_call("create_file", second), _answer())
         assert [a["filename"] for a in body["attachments"]] == ["final.docx"]
 
     def test_different_titles_are_all_kept(self, client, monkeypatch):
-        other = {"title": "Answers", "sections": []}
+        other = {"format": "docx", "title": "Answers", "sections": []}
         body = _chat(client, monkeypatch, None,
-                     _tool_call("create_document", DOC_ARGS), _tool_call("create_document", other), _answer())
+                     _tool_call("create_file", DOC_ARGS), _tool_call("create_file", other), _answer())
         assert [a["filename"] for a in body["attachments"]] == ["Worksheet.docx", "Answers.docx"]
 
-    def test_same_title_from_different_tools_are_both_kept(self, client, monkeypatch):
+    def test_same_title_in_different_formats_are_both_kept(self, client, monkeypatch):
         body = _chat(client, monkeypatch, None,
-                     _tool_call("create_document", DOC_ARGS), _tool_call("create_pdf", DOC_ARGS), _answer())
+                     _tool_call("create_file", DOC_ARGS), _tool_call("create_file", dict(DOC_ARGS, format="pdf")), _answer())
         assert [a["filename"] for a in body["attachments"]] == ["Worksheet.docx", "Worksheet.pdf"]
 
 
@@ -378,3 +378,48 @@ def test_images_count_as_a_fixed_size_in_history_trimming():
     older = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
     # A big photo no longer pushes the rest of the conversation out.
     assert main_mod._truncate_messages(older + [message], max_tokens=2048) == older + [message]
+
+
+class TestCreateFile:
+    SECTIONS = [
+        {"heading": "Cells", "paragraphs": ["Cells are **tiny**."], "bullets": ["Nucleus", "Mitochondria"]},
+        {"bullets": "Just one point"},
+    ]
+
+    def test_docx(self, sandbox):
+        from plugins.create_file import create_file
+        from plugins.read_document import read_document
+        result = create_file("docx", "Biology", self.SECTIONS)
+        assert result["attachment"] == "Biology.docx"
+        assert read_document("Biology.docx")["content"].splitlines() == [
+            "## Biology", "## Cells", "Cells are tiny.", "- Nucleus", "- Mitochondria", "- Just one point",
+        ]
+
+    def test_bold_in_docx_is_real_bold(self, sandbox):
+        from docx import Document
+        from plugins.create_file import create_file
+        create_file("docx", "B", [{"paragraphs": ["Cost: **£5** each"]}])
+        runs = [(r.text, bool(r.bold)) for r in Document(str(sandbox / "B.docx")).paragraphs[1].runs]
+        assert runs == [("Cost: ", False), ("£5", True), (" each", False)]
+
+    def test_pdf(self, sandbox):
+        from plugins.create_file import create_file
+        from plugins.read_document import read_document
+        assert create_file("PDF", "Biology", self.SECTIONS)["attachment"] == "Biology.pdf"
+        assert "Cells are tiny." in read_document("Biology.pdf")["content"]
+
+    def test_pptx_turns_each_section_into_a_slide(self, sandbox):
+        from plugins.create_file import create_file
+        from plugins.read_document import read_document
+        result = create_file(".pptx", "Biology", self.SECTIONS)
+        assert result["attachment"] == "Biology.pptx"
+        assert result["slide_count"] == 3  # title slide + one per section
+        content = read_document("Biology.pptx")["content"]
+        assert "--- slide 2 ---\nCells\nCells are tiny.\nNucleus\nMitochondria" in content  # ** stripped
+        assert "--- slide 3 ---\nJust one point" in content
+
+    def test_unknown_format_and_bad_sections(self):
+        from plugins.create_file import create_file
+        assert "format must be one of" in create_file("xlsx", "T", [])["error"]
+        assert "error" in create_file("pptx", "T", "not a list")
+        assert "error" in create_file("pptx", "T", ["not an object"])

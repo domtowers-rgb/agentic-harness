@@ -231,10 +231,10 @@ def fetch_url(url: str):
 def register(registry):
     registry.register("fetch_url", fetch_url, {
         "name": "fetch_url",
-        "description": "Fetch a public http(s) URL and return its readable text (HTML pages are converted to plain text, with menus, scripts and similar removed). Does not follow redirects.",
+        "description": "Fetch a public web page and return its readable text.",
         "parameters": {
             "type": "object",
-            "properties": {"url": {"type": "string", "description": "The URL to fetch"}},
+            "properties": {"url": {"type": "string"}},
             "required": ["url"],
         },
     })

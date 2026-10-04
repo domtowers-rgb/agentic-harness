@@ -42,12 +42,12 @@ def _plain(fragment):
 def register(registry):
     registry.register("web_search", web_search, {
         "name": "web_search",
-        "description": "Search the web (via Brave Search) and return matching results (title, url, snippet). Requires the BRAVE_API_KEY environment variable to be set.",
+        "description": "Search the web; returns titles, URLs and snippets.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "The search query"},
-                "count": {"type": "integer", "description": "Number of results to return (1-10, default 5)"},
+                "query": {"type": "string"},
+                "count": {"type": "integer", "description": "1-10, default 5"},
             },
             "required": ["query"],
         },

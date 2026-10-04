@@ -60,15 +60,11 @@ def calculate(expression: str):
 def register(registry):
     registry.register("calculate", calculate, {
         "name": "calculate",
-        "description": (
-            "Evaluate an arithmetic expression. Supports + - * / // % **, "
-            "parentheses, and functions like sqrt, abs, round, floor, ceil, "
-            "sin, cos, tan, log, log10, plus the constants pi and e."
-        ),
+        "description": "Evaluate a maths expression, e.g. '2 * (3 + 4)' or 'sqrt(16)'. Common functions (sqrt, round, sin, log...) and pi, e work.",
         "parameters": {
             "type": "object",
             "properties": {
-                "expression": {"type": "string", "description": "e.g. '2 * (3 + 4)' or 'sqrt(16)'"},
+                "expression": {"type": "string"},
             },
             "required": ["expression"],
         },

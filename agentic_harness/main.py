@@ -256,12 +256,14 @@ def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, A
             messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
             if isinstance(result, dict) and isinstance(result.get("attachment"), str):
                 path = result["attachment"]
-                # Same tool + same title = the same document, remade: seen
-                # live, a model built a presentation, then rebuilt it under
-                # a new filename in the same request, and both got sent.
-                # Different titles are different documents, and all kept.
+                # Same tool + same title + same format = the same document,
+                # remade: seen live, a model built a presentation, then
+                # rebuilt it under a new filename in the same request, and
+                # both got sent. Different titles (or a docx and a pdf of
+                # the same one) are different documents, and all kept.
                 title = args.get("title") if isinstance(args, dict) else None
-                attachments.append(((fname, title) if title else (fname, path), path))
+                key = (fname, title, args.get("format")) if title else (fname, path)
+                attachments.append((key, path))
     return attachments
 
 

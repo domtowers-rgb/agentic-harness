@@ -1,3 +1,5 @@
+import re
+
 from pptx import Presentation
 
 from plugins.file_ops import _resolve_safe, safe_output_name, sandbox_dir
@@ -9,6 +11,11 @@ MAX_BULLETS_PER_SLIDE = 50
 
 def _sanitize_filename(name: str) -> str:
     return safe_output_name(name, ".pptx", "presentation")
+
+
+def _plain(text) -> str:
+    """Slide text with any **bold** markers removed rather than shown."""
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", str(text))
 
 
 def create_presentation(title: str, slides: list, subtitle: str = None, filename: str = None):
@@ -43,12 +50,12 @@ def create_presentation(title: str, slides: list, subtitle: str = None, filename
                 return {"error": f"slide {i} has too many bullets (max {MAX_BULLETS_PER_SLIDE})"}
 
             slide = prs.slides.add_slide(bullet_layout)
-            slide.shapes.title.text = str(entry.get("title") or "")
+            slide.shapes.title.text = _plain(entry.get("title") or "")
             if bullets and len(slide.placeholders) > 1:
                 text_frame = slide.placeholders[1].text_frame
-                text_frame.text = str(bullets[0])
+                text_frame.text = _plain(bullets[0])
                 for bullet in bullets[1:]:
-                    text_frame.add_paragraph().text = str(bullet)
+                    text_frame.add_paragraph().text = _plain(bullet)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         prs.save(str(target))
@@ -60,37 +67,3 @@ def create_presentation(title: str, slides: list, subtitle: str = None, filename
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "slide_count": len(slides) + 1, "note": DELIVERY_NOTE}
 
-
-def register(registry):
-    registry.register("create_presentation", create_presentation, {
-        "name": "create_presentation",
-        "description": (
-            "Create a PowerPoint (.pptx) presentation and send it to the user. "
-            "The first slide is a title slide; each entry in 'slides' becomes a slide with a title and "
-            "bullet points."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Presentation title, shown on the first slide"},
-                "subtitle": {"type": "string", "description": "Optional subtitle shown under the title on the first slide"},
-                "slides": {
-                    "type": "array",
-                    "description": "Content slides after the title slide",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "bullets": {"type": "array", "items": {"type": "string"}},
-                        },
-                        "required": ["title"],
-                    },
-                },
-                "filename": {
-                    "type": "string",
-                    "description": "Output filename, e.g. 'my_deck.pptx'. Defaults to a name derived from the title.",
-                },
-            },
-            "required": ["title", "slides"],
-        },
-    })

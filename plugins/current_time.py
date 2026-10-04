@@ -23,11 +23,11 @@ def get_current_time(timezone: str = "UTC"):
 def register(registry):
     registry.register("get_current_time", get_current_time, {
         "name": "get_current_time",
-        "description": "Get the current date and time, optionally in a specific IANA timezone (e.g. 'America/New_York'). Defaults to UTC.",
+        "description": "Get the current date and time (UTC unless a timezone is given).",
         "parameters": {
             "type": "object",
             "properties": {
-                "timezone": {"type": "string", "description": "IANA timezone name, e.g. 'Europe/London'. Defaults to UTC."},
+                "timezone": {"type": "string", "description": "e.g. 'Europe/London'"},
             },
             "required": [],
         },

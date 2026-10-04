@@ -56,31 +56,31 @@ def forget(key: str):
 def register(registry):
     registry.register("remember", remember, {
         "name": "remember",
-        "description": "Save a small piece of information under a short key, persisted across conversations in this chat.",
+        "description": "Save a fact under a short key, to recall in later conversations.",
         "parameters": {
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "A short label to save this under, e.g. 'favorite_color'"},
-                "value": {"type": "string", "description": "The information to remember"},
+                "key": {"type": "string", "description": "e.g. 'favorite_color'"},
+                "value": {"type": "string"},
             },
             "required": ["key", "value"],
         },
     })
     registry.register("recall", recall, {
         "name": "recall",
-        "description": "Retrieve a previously remembered value by key. Omit the key to list everything remembered.",
+        "description": "Look up a remembered fact by key, or list them all if no key is given.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "The label to look up. Omit to list everything."}},
+            "properties": {"key": {"type": "string"}},
             "required": [],
         },
     })
     registry.register("forget", forget, {
         "name": "forget",
-        "description": "Delete a previously remembered value by key.",
+        "description": "Delete a remembered fact.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "The label to delete"}},
+            "properties": {"key": {"type": "string"}},
             "required": ["key"],
         },
     })

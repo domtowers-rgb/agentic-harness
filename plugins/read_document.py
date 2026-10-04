@@ -91,15 +91,14 @@ def register(registry):
     registry.register("read_document", read_document, {
         "name": "read_document",
         "description": (
-            "Read the text of a PDF, Word (.docx), PowerPoint (.pptx) or plain text file in the working "
-            "directory - including files the user has sent. Long documents come back a chunk at a time: "
-            "if the result has 'next_start', call again with start set to it to read on."
+            "Read a PDF, docx, pptx or text file in the working directory (e.g. one the user sent). "
+            "Long files come in chunks: if the result has next_start, call again with start=next_start."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path of the file in the working directory, e.g. 'uploads/report.pdf'"},
-                "start": {"type": "integer", "description": "Character offset to start reading from (default 0)"},
+                "path": {"type": "string", "description": "e.g. 'uploads/report.pdf'"},
+                "start": {"type": "integer"},
             },
             "required": ["path"],
         },

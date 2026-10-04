@@ -119,37 +119,3 @@ def create_pdf(title: str, sections: list, filename: str = None):
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "section_count": len(sections), "note": DELIVERY_NOTE}
 
-
-def register(registry):
-    registry.register("create_pdf", create_pdf, {
-        "name": "create_pdf",
-        "description": (
-            "Create a PDF document - e.g. a handout, information sheet or report that shouldn't be edited - "
-            "and send it to the user. It starts with the title; each entry in 'sections' adds an optional "
-            "heading followed by its paragraphs and then its bullet points. **double asterisks** make text bold. "
-            "To read an existing PDF, use read_document instead."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Document title, shown at the top"},
-                "sections": {
-                    "type": "array",
-                    "description": "The document's sections, in order",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "heading": {"type": "string", "description": "Optional section heading"},
-                            "paragraphs": {"type": "array", "items": {"type": "string"}},
-                            "bullets": {"type": "array", "items": {"type": "string"}},
-                        },
-                    },
-                },
-                "filename": {
-                    "type": "string",
-                    "description": "Output filename, e.g. 'info_sheet.pdf'. Defaults to a name derived from the title.",
-                },
-            },
-            "required": ["title", "sections"],
-        },
-    })

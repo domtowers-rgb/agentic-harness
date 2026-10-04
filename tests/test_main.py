@@ -279,8 +279,9 @@ def test_plugins_endpoint_lists_registered_plugins(client):
     r = client.get("/v1/plugins")
     assert r.status_code == 200
     names = {p["name"] for p in r.json()["plugins"]}
-    assert "calculate" in names
-    assert "hello" in names
+    assert {"calculate", "create_file", "read_document"} <= names
+    # One tool for all document formats, not one each; no example plugin.
+    assert not names & {"create_document", "create_pdf", "create_presentation", "hello"}
 
 
 def test_connect_requires_base_url(client):

@@ -1,3 +1,5 @@
+import re
+
 from docx import Document
 
 from plugins.file_ops import _resolve_safe, safe_output_name, sandbox_dir
@@ -28,6 +30,15 @@ def _as_text_list(value, what: str, index: int):
     return [str(item) for item in value]
 
 
+def _add_paragraph(doc, text: str, style: str = None):
+    """A paragraph with **double-asterisk** spans in bold, as create_pdf
+    supports - models write it constantly."""
+    paragraph = doc.add_paragraph(style=style)
+    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
+        if part:
+            paragraph.add_run(part).bold = i % 2 == 1
+
+
 def create_document(title: str, sections: list, filename: str = None):
     """Create a .docx file in the sandboxed working directory: a title,
     then one optional heading plus paragraphs and/or bullet points per
@@ -53,9 +64,9 @@ def create_document(title: str, sections: list, filename: str = None):
             if section.get("heading"):
                 doc.add_heading(str(section["heading"]), level=1)
             for paragraph in _as_text_list(section.get("paragraphs"), "paragraphs", i):
-                doc.add_paragraph(paragraph)
+                _add_paragraph(doc, paragraph)
             for bullet in _as_text_list(section.get("bullets"), "bullets", i):
-                doc.add_paragraph(bullet, style="List Bullet")
+                _add_paragraph(doc, bullet, style="List Bullet")
 
         target.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(target))
@@ -69,36 +80,3 @@ def create_document(title: str, sections: list, filename: str = None):
     # _run_tool_calls in agentic_harness/main.py.
     return {"status": "written", "path": path, "attachment": path, "section_count": len(sections), "note": DELIVERY_NOTE}
 
-
-def register(registry):
-    registry.register("create_document", create_document, {
-        "name": "create_document",
-        "description": (
-            "Create a Word (.docx) document - e.g. a handout, worksheet, letter or report - and send it "
-            "to the user. It starts with the title; each entry in 'sections' adds an optional heading "
-            "followed by its paragraphs and then its bullet points."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Document title, shown at the top"},
-                "sections": {
-                    "type": "array",
-                    "description": "The document's sections, in order",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "heading": {"type": "string", "description": "Optional section heading"},
-                            "paragraphs": {"type": "array", "items": {"type": "string"}},
-                            "bullets": {"type": "array", "items": {"type": "string"}},
-                        },
-                    },
-                },
-                "filename": {
-                    "type": "string",
-                    "description": "Output filename, e.g. 'worksheet.docx'. Defaults to a name derived from the title.",
-                },
-            },
-            "required": ["title", "sections"],
-        },
-    })

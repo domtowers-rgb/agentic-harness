@@ -22,6 +22,21 @@ def _isolate_audit_log(tmp_path, monkeypatch):
     monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(tmp_path / "audit.log"))
 
 
+@pytest.fixture(autouse=True)
+def hello_tool(monkeypatch):
+    """A trivial tool the tool-loop tests can call by name. (It used to
+    be a real example plugin, but every loaded plugin's definition is
+    sent to the model with every prompt, so it now exists only here.)"""
+    from agentic_harness import plugins
+
+    def hello(name: str = "world") -> str:
+        return f"Hello, {name}!"
+
+    spec = {"name": "hello", "description": "Say hello to someone",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": []}}
+    monkeypatch.setitem(plugins.registry._registry, "hello", {"callable": hello, "spec": spec})
+
+
 @pytest.fixture
 def client():
     """A TestClient against the real app, running whatever backend main.py

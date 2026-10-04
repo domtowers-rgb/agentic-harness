@@ -113,31 +113,31 @@ def list_files(path: str = "."):
 def register(registry):
     registry.register("read_file", read_file, {
         "name": "read_file",
-        "description": "Read a text file from the working directory. Cannot access anything outside it.",
+        "description": "Read a text file in the working directory.",
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "Path relative to the sandbox directory"}},
+            "properties": {"path": {"type": "string"}},
             "required": ["path"],
         },
     })
     registry.register("write_file", write_file, {
         "name": "write_file",
-        "description": "Write text to a file in the working directory, creating it (and parent folders) if needed. Cannot access anything outside it.",
+        "description": "Write a text file in the working directory.",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Path relative to the sandbox directory"},
-                "content": {"type": "string", "description": "Text content to write"},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
             },
             "required": ["path", "content"],
         },
     })
     registry.register("list_files", list_files, {
         "name": "list_files",
-        "description": "List files and folders in a directory within the working directory.",
+        "description": "List files in the working directory, or a folder in it.",
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "Path relative to the sandbox directory, defaults to '.'"}},
+            "properties": {"path": {"type": "string"}},
             "required": [],
         },
     })
