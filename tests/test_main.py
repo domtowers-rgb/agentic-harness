@@ -380,7 +380,7 @@ def test_personality_prepended_when_client_supplies_no_system_message(client, mo
     assert captured["messages"][1] == {"role": "user", "content": "hi"}
 
 
-def test_personality_not_prepended_when_client_supplies_own_system_message(client, monkeypatch):
+def test_personality_is_combined_with_the_clients_own_system_message(client, monkeypatch):
     captured = {}
 
     class SpyModel:
@@ -398,7 +398,8 @@ def test_personality_not_prepended_when_client_supplies_own_system_message(clien
         ],
     })
 
-    assert captured["messages"][0] == {"role": "system", "content": "Custom system prompt."}
+    # One system message, personality first, then the client's own context.
+    assert captured["messages"][0] == {"role": "system", "content": "Be concise and friendly.\n\nCustom system prompt."}
     assert len(captured["messages"]) == 2
 
 

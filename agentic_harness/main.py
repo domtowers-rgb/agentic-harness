@@ -144,6 +144,24 @@ def _content_chars(message: Dict[str, Any]) -> int:
     return len(json.dumps(content, default=str))
 
 
+def _with_personality(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Put PERSONALITY first. If the client sent its own leading system
+    message - e.g. agentic-gateway explaining who's in a group chat - the
+    two are combined into one, personality first: that context adds to the
+    personality rather than replacing it, and many local chat templates
+    accept only a single system message, at the start."""
+    if not PERSONALITY:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        own = messages[0].get("content")
+        if isinstance(own, str):
+            combined = f"{PERSONALITY}\n\n{own}" if own.strip() else PERSONALITY
+        else:  # content parts
+            combined = [{"type": "text", "text": PERSONALITY}, *(own or [])]
+        return [{**messages[0], "content": combined}] + messages[1:]
+    return [{"role": "system", "content": PERSONALITY}] + messages
+
+
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
     """Drop the oldest messages until the history fits max_tokens (very
     simple heuristic: ~4 chars per token).
@@ -557,10 +575,8 @@ async def chat_completions(request: Request):
 
     # Personality system prompt: a small, fixed addition on top of the
     # (already-trimmed) conversation budget, so it's never at risk of being
-    # trimmed away itself. Only added if the caller didn't already supply
-    # their own system message - theirs wins if given.
-    if PERSONALITY and not (messages and messages[0].get("role") == "system"):
-        messages = [{"role": "system", "content": PERSONALITY}] + messages
+    # trimmed away itself.
+    messages = _with_personality(messages)
 
     if stream:
         async def event_stream():
