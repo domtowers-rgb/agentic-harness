@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import uvicorn
-from . import model, plugins
+from . import model, plugins, transcribe
 import os
 import re
 import json
@@ -477,6 +477,26 @@ async def upload_file(request: Request, filename: str = "", user: str = ""):
     return JSONResponse(content={"path": path, "filename": target.name, "size": len(body)})
 
 
+@app.post("/v1/transcribe")
+async def transcribe_audio(request: Request):
+    """Transcribe a voice message: the audio file as the raw request body
+    (any common format), returning {"text", "language", "duration"}.
+    agentic-gateway uses it for Signal voice notes. 501 if faster-whisper
+    isn't installed. (Not OpenAI's /v1/audio/transcriptions: that one is a
+    multipart form, which would need another dependency.)"""
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="no audio in the request body")
+    if len(body) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+    try:
+        return JSONResponse(content=await asyncio.to_thread(transcribe.transcribe, body))
+    except transcribe.TranscriptionUnavailable as exc:
+        raise HTTPException(status_code=501, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"couldn't transcribe that audio: {exc}")
+
+
 @app.get("/v1/files/{path:path}")
 async def download_file(path: str):
     """Download a file from the sandbox - how a client fetches what a tool
@@ -493,13 +513,55 @@ async def download_file(path: str):
     return FileResponse(target, filename=target.name)
 
 
+# One load at a time - two overlapping "make this the only model" requests
+# would eject each other's models.
+_load_lock = asyncio.Lock()
+
+
+@app.post("/v1/models/load")
+async def load_model(request: Request):
+    """{"model": id} -> make it the only chat model loaded on the backend:
+    every other loaded chat model is ejected first, then it's loaded (if it
+    wasn't already). LM Studio only (501 otherwise). Can take a minute or
+    more for a big model. Note this affects everything using the backend,
+    not just the caller. Returns {"model", "unloaded", "already_loaded",
+    "load_time_seconds"}."""
+    body = await request.json()
+    model_id = body.get("model") if isinstance(body, dict) else None
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise HTTPException(status_code=400, detail="model is required")
+    if not hasattr(model_impl, "load_exclusive"):
+        raise HTTPException(status_code=501, detail="loading models is only supported with LM Studio")
+    async with _load_lock:
+        try:
+            result = await asyncio.to_thread(model_impl.load_exclusive, model_id.strip())
+        except model.LoadUnavailable as exc:
+            raise HTTPException(status_code=501, detail=str(exc))
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no model named {model_id!r}")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"loading {model_id} failed: {exc}")
+    return JSONResponse(content=result)
+
+
 @app.get("/v1/models")
 async def list_models():
+    """The backend's models, OpenAI-style. Where the backend can say (LM
+    Studio), each entry also carries "loaded" and "type" - extra fields
+    OpenAI-compatible clients ignore; agentic-gateway's /model uses them
+    to offer only loaded chat models."""
     try:
         ids = await asyncio.to_thread(model_impl.list_models)
     except Exception:
         ids = []
-    return JSONResponse(content={"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
+    details = None
+    if hasattr(model_impl, "model_details"):
+        try:
+            details = await asyncio.to_thread(model_impl.model_details)
+        except Exception:
+            details = None
+    data = [{"id": i, "object": "model", **((details or {}).get(i) or {})} for i in ids]
+    return JSONResponse(content={"object": "list", "data": data})
 
 
 @app.get("/v1/plugins")

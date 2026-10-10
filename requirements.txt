@@ -7,3 +7,4 @@ python-pptx
 pypdf
 python-docx
 reportlab
+faster-whisper

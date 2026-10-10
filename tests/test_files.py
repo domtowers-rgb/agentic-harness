@@ -423,3 +423,87 @@ class TestCreateFile:
         assert "format must be one of" in create_file("xlsx", "T", [])["error"]
         assert "error" in create_file("pptx", "T", "not a list")
         assert "error" in create_file("pptx", "T", ["not an object"])
+
+
+class TestTranscribe:
+    def test_returns_the_transcription(self, client, monkeypatch):
+        seen = {}
+
+        def fake(audio):
+            seen["audio"] = audio
+            return {"text": "see you at four", "language": "en", "duration": 2.1}
+
+        monkeypatch.setattr(main_mod.transcribe, "transcribe", fake)
+        r = client.post("/v1/transcribe", content=b"aac bytes")
+        assert r.status_code == 200
+        assert r.json() == {"text": "see you at four", "language": "en", "duration": 2.1}
+        assert seen["audio"] == b"aac bytes"
+
+    def test_without_faster_whisper_it_says_so(self, client, monkeypatch):
+        def unavailable(audio):
+            raise main_mod.transcribe.TranscriptionUnavailable("faster-whisper isn't installed")
+
+        monkeypatch.setattr(main_mod.transcribe, "transcribe", unavailable)
+        r = client.post("/v1/transcribe", content=b"x")
+        assert r.status_code == 501
+        assert "faster-whisper" in r.json()["detail"]
+
+    def test_undecodable_audio_is_a_clean_error(self, client, monkeypatch):
+        def broken(audio):
+            raise ValueError("Invalid data found when processing input")
+
+        monkeypatch.setattr(main_mod.transcribe, "transcribe", broken)
+        assert client.post("/v1/transcribe", content=b"not audio").status_code == 422
+
+    def test_empty_and_oversized_requests(self, client, monkeypatch):
+        assert client.post("/v1/transcribe", content=b"").status_code == 400
+        monkeypatch.setattr(main_mod, "MAX_UPLOAD_BYTES", 3)
+        assert client.post("/v1/transcribe", content=b"1234").status_code == 413
+
+    def test_cross_site_requests_are_refused(self, client):
+        assert client.post("/v1/transcribe", content=b"x", headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def _m4a_tone(seconds=1.5):
+    """A real AAC-in-M4A file, like a Signal voice note, made with PyAV."""
+    import io
+    import math
+
+    import av
+    import numpy as np
+
+    rate = 44100
+    buffer = io.BytesIO()
+    with av.open(buffer, "w", format="mp4") as container:
+        stream = container.add_stream("aac", rate=rate)
+        stream.layout = "mono"
+        samples = (0.3 * np.sin(2 * math.pi * 440 * np.arange(int(rate * seconds)) / rate)).astype(np.float32)
+        for start in range(0, len(samples), 1024):
+            frame = av.AudioFrame.from_ndarray(samples[start:start + 1024].reshape(1, -1), format="flt", layout="mono")
+            frame.sample_rate = rate
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return buffer.getvalue()
+
+
+class TestAudioDecoding:
+    def test_a_signal_style_m4a_decodes_to_16khz_samples(self):
+        # The exact path that failed live: faster-whisper's own decoder
+        # broke against PyAV 19 on every voice note.
+        samples = main_mod.transcribe._decode(_m4a_tone(1.5))
+        assert samples.dtype.name == "float32"
+        assert abs(len(samples) / 16000 - 1.5) < 0.1
+        assert 0.1 < abs(samples).max() <= 1.0
+
+    def test_near_empty_audio_skips_the_model(self, monkeypatch):
+        def no_model():
+            raise AssertionError("the model shouldn't be loaded for no audio")
+
+        monkeypatch.setattr(main_mod.transcribe, "_load", no_model)
+        assert main_mod.transcribe.transcribe(_m4a_tone(0.02))["text"] == ""
+
+    def test_garbage_is_an_error(self):
+        with pytest.raises(Exception):
+            main_mod.transcribe._decode(b"definitely not audio")

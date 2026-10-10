@@ -56,8 +56,13 @@ cp .env.example .env    # then edit .env
 - `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep (an image in a message counts as about 250 tokens, not its data size), in the same rough chars/4 heuristic `_truncate_messages` uses (default `2048`). Tune this to roughly match your local model's actual configured context window. Oldest messages are dropped first, but the newest message is always kept even if it's over budget on its own (a long paste is sent rather than silently dropped), as is a leading system message.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is put first, as the system message, on every request; if the request has its own system message (agentic-gateway uses one to explain who's in a group chat), the two are combined - personality first - since many local chat templates accept only one system message. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
+- `AGENTIC_WHISPER_MODEL`: speech model for voice messages (default `small`; see "Voice messages").
 - `AGENTIC_ALLOWED_HOSTS`: extra hostnames the server answers to, comma-separated (see "Browser protection").
 - `AGENTIC_AUDIT_LOG`: path to the tool-call audit log (default `audit.log`). See "Audit log" below.
+
+`GET /v1/models` lists the backend's models OpenAI-style; with LM Studio, each entry also has `"loaded": true/false` and `"type"` (`llm`, `vlm`, `embeddings`), read from LM Studio's own `/api/v0/models` - extra fields that OpenAI-compatible clients ignore.
+
+`POST /v1/models/load` with `{"model": "<id>"}` makes that the only chat model loaded on an LM Studio backend: every other loaded chat model is ejected first (embedding models are left alone), then it's loaded unless it already is - via LM Studio's own `/api/v1/models` management API. Returns `{"model", "unloaded", "already_loaded", "load_time_seconds"}`; 501 for other backends, 404 for an unknown model, 502 with LM Studio's reason if loading fails. It affects everything using that LM Studio, not just the caller; one load runs at a time.
 
 **If the requested model isn't loaded on the backend** (e.g. `AGENTIC_DEFAULT_MODEL` names a model that isn't actually running in LM Studio), `/v1/chat/completions` (non-streaming only) returns `404` with a machine-readable body instead of an opaque `500`:
 
@@ -113,6 +118,10 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_READ_MAX_CHARS`: how much text `read_document` returns per call (default `8000`).
 - `AGENTIC_MAX_UPLOAD_BYTES`: largest file `POST /v1/files` accepts (default 25 MB).
 - `AGENTIC_FETCH_MAX_CHARS`: max characters of page text `fetch_url` returns (default `8000`, applied after HTML-to-text conversion). The whole result goes into the model's context, so keep it well inside your model's window.
+
+Voice messages
+
+`POST /v1/transcribe` with an audio file as the raw request body (any common format - Signal voice notes are AAC) returns `{"text", "language", "duration"}`, transcribed on this machine's CPU with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). agentic-gateway uses it to turn Signal voice messages into text for the model. The model (`AGENTIC_WHISPER_MODEL`, default `small`) loads on the first voice message after a start - and the very first time, downloads from Hugging Face into `~/.cache/huggingface` (`small` is about 480 MB) - so that one takes a while. Transcriptions run one at a time, since each already uses every CPU core. Without faster-whisper installed, the endpoint returns 501 and the gateway tells the model a voice message couldn't be transcribed.
 
 Browser protection
 

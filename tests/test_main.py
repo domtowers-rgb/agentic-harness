@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agentic_harness import main as main_mod, model
 
 
@@ -775,3 +777,157 @@ def test_stopping_a_stream_early_closes_the_model_stream():
     assert asyncio.run(consume_two_then_stop()) == [0, 1]
     assert closed.wait(2), "model stream was never closed"
     assert len(produced) < 10  # stopped within a few items, not all 1000
+
+
+class TestModelDetails:
+    def test_models_endpoint_adds_loaded_and_type_when_known(self, client, monkeypatch):
+        class LMStudioLike:
+            def list_models(self):
+                return ["chat-a", "chat-b", "embedder"]
+
+            def model_details(self):
+                return {"chat-a": {"loaded": True, "type": "vlm"}, "chat-b": {"loaded": False, "type": "llm"},
+                        "embedder": {"loaded": False, "type": "embeddings"}}
+
+        monkeypatch.setattr(main_mod, "model_impl", LMStudioLike())
+        assert client.get("/v1/models").json()["data"] == [
+            {"id": "chat-a", "object": "model", "loaded": True, "type": "vlm"},
+            {"id": "chat-b", "object": "model", "loaded": False, "type": "llm"},
+            {"id": "embedder", "object": "model", "loaded": False, "type": "embeddings"},
+        ]
+
+    def test_plain_openai_servers_list_as_before(self, client, monkeypatch):
+        class PlainServer:
+            def list_models(self):
+                return ["m"]
+
+            def model_details(self):
+                return None
+
+        monkeypatch.setattr(main_mod, "model_impl", PlainServer())
+        assert client.get("/v1/models").json()["data"] == [{"id": "m", "object": "model"}]
+
+    def test_lm_studio_details_come_from_its_rest_api(self, monkeypatch):
+        import httpx
+        seen = {}
+
+        def fake_get(url, timeout=None):
+            seen["url"] = url
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"data": [
+                {"id": "gemma", "type": "vlm", "state": "loaded"},
+                {"id": "nomic", "type": "embeddings", "state": "not-loaded"},
+            ]})
+
+        monkeypatch.setattr(model.httpx, "get", fake_get)
+        details = model.OpenAIModel(base_url="http://10.0.0.5:1234/v1").model_details()
+        assert seen["url"] == "http://10.0.0.5:1234/api/v0/models"
+        assert details == {"gemma": {"loaded": True, "type": "vlm"}, "nomic": {"loaded": False, "type": "embeddings"}}
+
+    def test_details_are_none_when_the_server_has_no_such_api(self, monkeypatch):
+        import httpx
+
+        def not_found(url, timeout=None):
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(model.httpx, "get", not_found)
+        assert model.OpenAIModel(base_url="http://10.0.0.5:11434/v1").model_details() is None
+
+
+class FakeLMStudio:
+    """Just enough of LM Studio's /api/v1 model management to test
+    load_exclusive: tracks loaded instances, records every call."""
+
+    def __init__(self, loaded=("big", "small", "embedder")):
+        self.models = {"big": "llm", "small": "llm", "seeing": "vlm", "embedder": "embedding"}
+        self.loaded = set(loaded)
+        self.calls = []
+
+    def get(self, url, timeout=None):
+        import httpx
+        self.calls.append(("GET", url.split("1234")[1]))
+        models = [{"key": k, "type": t, "loaded_instances": [{"id": k}] if k in self.loaded else []}
+                  for k, t in self.models.items()]
+        return httpx.Response(200, request=httpx.Request("GET", url), json={"models": models})
+
+    def post(self, url, json=None, timeout=None):
+        import httpx
+        path = url.split("1234")[1]
+        self.calls.append(("POST", path, json))
+        if path.endswith("/unload"):
+            self.loaded.discard(json["instance_id"])
+            return httpx.Response(200, request=httpx.Request("POST", url), json={"instance_id": json["instance_id"]})
+        if json["model"] == "too-big":
+            return httpx.Response(500, request=httpx.Request("POST", url), json={"error": {"message": "Failed to load model: out of memory"}})
+        self.loaded.add(json["model"])
+        return httpx.Response(200, request=httpx.Request("POST", url), json={"status": "loaded", "load_time_seconds": 12.5})
+
+
+class TestLoadExclusive:
+    def _backend(self, monkeypatch, studio):
+        monkeypatch.setattr(model.httpx, "get", studio.get)
+        monkeypatch.setattr(model.httpx, "post", studio.post)
+        return model.OpenAIModel(base_url="http://10.0.0.5:1234/v1")
+
+    def test_ejects_other_chat_models_first_then_loads(self, monkeypatch):
+        studio = FakeLMStudio()
+        result = self._backend(monkeypatch, studio).load_exclusive("seeing")
+        assert result == {"model": "seeing", "unloaded": ["big", "small"], "already_loaded": False, "load_time_seconds": 12.5}
+        assert studio.loaded == {"seeing", "embedder"}  # embedding model left alone
+        posts = [c for c in studio.calls if c[0] == "POST"]
+        assert posts[-1] == ("POST", "/api/v1/models/load", {"model": "seeing"})  # unloads came first
+
+    def test_already_loaded_model_is_not_reloaded(self, monkeypatch):
+        studio = FakeLMStudio()
+        result = self._backend(monkeypatch, studio).load_exclusive("small")
+        assert result["already_loaded"] is True and result["unloaded"] == ["big"]
+        assert not any(c[1] == "/api/v1/models/load" for c in studio.calls if c[0] == "POST")
+        assert studio.loaded == {"small", "embedder"}
+
+    def test_unknown_model(self, monkeypatch):
+        with pytest.raises(KeyError):
+            self._backend(monkeypatch, FakeLMStudio()).load_exclusive("nope")
+
+    def test_load_failure_says_why(self, monkeypatch):
+        studio = FakeLMStudio()
+        studio.models["too-big"] = "llm"
+        with pytest.raises(RuntimeError, match="out of memory"):
+            self._backend(monkeypatch, studio).load_exclusive("too-big")
+
+    def test_not_lm_studio(self, monkeypatch):
+        import httpx
+        monkeypatch.setattr(model.httpx, "get", lambda url, timeout=None: httpx.Response(404, request=httpx.Request("GET", url)))
+        with pytest.raises(model.LoadUnavailable):
+            model.OpenAIModel(base_url="http://10.0.0.5:11434/v1").load_exclusive("x")
+
+
+class TestLoadEndpoint:
+    def test_loads_and_reports(self, client, monkeypatch):
+        class Backend:
+            def load_exclusive(self, model_id):
+                return {"model": model_id, "unloaded": ["old"], "already_loaded": False, "load_time_seconds": 3.0}
+
+        monkeypatch.setattr(main_mod, "model_impl", Backend())
+        r = client.post("/v1/models/load", json={"model": "new"})
+        assert r.status_code == 200 and r.json()["unloaded"] == ["old"]
+
+    def test_errors_map_to_statuses(self, client, monkeypatch):
+        class Backend:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def load_exclusive(self, model_id):
+                raise self.exc
+
+        for exc, status in ((model.LoadUnavailable("not LM Studio"), 501), (KeyError("x"), 404), (RuntimeError("LM Studio: out of memory"), 502)):
+            monkeypatch.setattr(main_mod, "model_impl", Backend(exc))
+            r = client.post("/v1/models/load", json={"model": "x"})
+            assert r.status_code == status
+        assert "out of memory" in r.json()["detail"]
+
+    def test_mock_backend_and_bad_requests(self, client, monkeypatch):
+        monkeypatch.setattr(main_mod, "model_impl", model.MockModel())
+        assert client.post("/v1/models/load", json={"model": "x"}).status_code == 501
+        assert client.post("/v1/models/load", json={}).status_code == 400
+
+    def test_cross_site_requests_are_refused(self, client):
+        assert client.post("/v1/models/load", json={"model": "x"}, headers={"Origin": "https://evil.example"}).status_code == 403
