@@ -6,6 +6,7 @@ import json
 import pytest
 
 import plugins.file_ops as file_ops
+import plugins.voice as voice
 from agentic_harness import main as main_mod
 
 
@@ -433,31 +434,22 @@ class TestTranscribe:
             seen["audio"] = audio
             return {"text": "see you at four", "language": "en", "duration": 2.1}
 
-        monkeypatch.setattr(main_mod.transcribe, "transcribe", fake)
+        monkeypatch.setattr(voice, "transcribe", fake)
         r = client.post("/v1/transcribe", content=b"aac bytes")
         assert r.status_code == 200
         assert r.json() == {"text": "see you at four", "language": "en", "duration": 2.1}
         assert seen["audio"] == b"aac bytes"
 
-    def test_without_faster_whisper_it_says_so(self, client, monkeypatch):
-        def unavailable(audio):
-            raise main_mod.transcribe.TranscriptionUnavailable("faster-whisper isn't installed")
-
-        monkeypatch.setattr(main_mod.transcribe, "transcribe", unavailable)
-        r = client.post("/v1/transcribe", content=b"x")
-        assert r.status_code == 501
-        assert "faster-whisper" in r.json()["detail"]
-
     def test_undecodable_audio_is_a_clean_error(self, client, monkeypatch):
         def broken(audio):
             raise ValueError("Invalid data found when processing input")
 
-        monkeypatch.setattr(main_mod.transcribe, "transcribe", broken)
+        monkeypatch.setattr(voice, "transcribe", broken)
         assert client.post("/v1/transcribe", content=b"not audio").status_code == 422
 
     def test_empty_and_oversized_requests(self, client, monkeypatch):
         assert client.post("/v1/transcribe", content=b"").status_code == 400
-        monkeypatch.setattr(main_mod, "MAX_UPLOAD_BYTES", 3)
+        monkeypatch.setattr(voice, "MAX_AUDIO_BYTES", 3)
         assert client.post("/v1/transcribe", content=b"1234").status_code == 413
 
     def test_cross_site_requests_are_refused(self, client):
@@ -492,7 +484,7 @@ class TestAudioDecoding:
     def test_a_signal_style_m4a_decodes_to_16khz_samples(self):
         # The exact path that failed live: faster-whisper's own decoder
         # broke against PyAV 19 on every voice note.
-        samples = main_mod.transcribe._decode(_m4a_tone(1.5))
+        samples = voice._decode(_m4a_tone(1.5))
         assert samples.dtype.name == "float32"
         assert abs(len(samples) / 16000 - 1.5) < 0.1
         assert 0.1 < abs(samples).max() <= 1.0
@@ -501,9 +493,102 @@ class TestAudioDecoding:
         def no_model():
             raise AssertionError("the model shouldn't be loaded for no audio")
 
-        monkeypatch.setattr(main_mod.transcribe, "_load", no_model)
-        assert main_mod.transcribe.transcribe(_m4a_tone(0.02))["text"] == ""
+        import faster_whisper
+        monkeypatch.setattr(faster_whisper, "WhisperModel", no_model)
+        assert voice.transcribe(_m4a_tone(0.02))["text"] == ""
 
     def test_garbage_is_an_error(self):
         with pytest.raises(Exception):
-            main_mod.transcribe._decode(b"definitely not audio")
+            voice._decode(b"definitely not audio")
+
+
+class TestSpeech:
+    def test_speakable_reads_markdown_sensibly(self):
+        from plugins.voice import speakable
+        text = (
+            "## Plan\n- **Wednesday** at *3:30*\n1. Bring `goggles`\n"
+            "See [the club page](https://example.org/club) or https://example.org.\n```\nprint(1)\n```"
+        )
+        assert speakable(text) == (
+            "Plan Wednesday at 3:30 Bring goggles See the club page or (link in the message). (code shown in the message)"
+        )
+
+    def test_speakable_leaves_snake_case_and_maths_alone(self):
+        from plugins.voice import speakable
+        assert speakable("Open my_file_name.txt, then 2 * 3 * 4 = 24.") == "Open my_file_name.txt, then 2 * 3 * 4 = 24."
+
+    def test_long_text_is_cut_at_a_sentence(self, monkeypatch):
+        monkeypatch.setattr(voice, "MAX_SPOKEN_CHARS", 40)
+        spoken = voice.speakable("First sentence is here. Second sentence goes on. Third one too.")
+        assert spoken == "First sentence is here. Second sentence goes on. The rest is in the message." or \
+            spoken == "First sentence is here. The rest is in the message."
+
+    def test_endpoint_returns_audio(self, client, monkeypatch):
+        seen = {}
+
+        def fake_speak(text):
+            seen["text"] = text
+            return b"m4a bytes"
+
+        monkeypatch.setattr(voice, "speak", fake_speak)
+        r = client.post("/v1/speak", json={"text": "Hello there"})
+        assert (r.status_code, r.headers["content-type"], r.content) == (200, "audio/mp4", b"m4a bytes")
+        assert seen["text"] == "Hello there"
+
+    def test_endpoint_errors(self, client, monkeypatch):
+        assert client.post("/v1/speak", json={"text": "  "}).status_code == 400
+
+        assert client.post("/v1/speak", json={"text": "hi"}, headers={"Origin": "https://evil.example"}).status_code == 403
+
+    def test_real_speech_round_trips_through_transcription(self):
+        """Piper -> .m4a -> Whisper should give back (roughly) the words.
+        Uses the real models, so it's skipped if they aren't available."""
+        try:
+            audio = voice.speak("The quick brown fox jumps over the lazy dog.")
+            heard = voice.transcribe(audio)["text"].lower()
+        except Exception as exc:
+            pytest.skip(f"speech or transcription models unavailable: {exc}")
+        assert audio[4:8] == b"ftyp"  # an MP4/M4A container
+        assert "quick brown fox" in heard and "lazy dog" in heard
+
+
+class TestVoiceIsAPlugin:
+    def test_status_lists_the_voice_endpoints_when_installed(self, client):
+        endpoints = client.get("/v1/status").json()["endpoints"]
+        assert {"/v1/transcribe", "/v1/speak", "/v1/chat/completions"} <= set(endpoints)
+
+    def test_plugins_can_add_endpoints(self, tmp_path, monkeypatch):
+        import sys
+        import types
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from agentic_harness import plugins as loader
+
+        # The loader lists the folder, then imports "plugins.<name>" - so
+        # stand the module in under that name.
+        (tmp_path / "pinger.py").write_text("")
+        pinger = types.ModuleType("plugins.pinger")
+        pinger.register_routes = lambda app: app.add_api_route("/v1/ping", lambda: {"pong": True}, methods=["GET"])
+        monkeypatch.setitem(sys.modules, "plugins.pinger", pinger)
+
+        app = FastAPI()
+        loader.load_plugins(str(tmp_path), app=app)
+        assert TestClient(app).get("/v1/ping").json() == {"pong": True}
+
+    def test_missing_voice_libraries_skip_the_plugin(self, monkeypatch, capsys):
+        """Without the voice libraries, the plugin fails to import - so the
+        loader skips it, logs why, and its endpoints never exist."""
+        import importlib.util
+        import sys
+        real_find_spec = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: None if name == "piper" else real_find_spec(name, *a, **k))
+        monkeypatch.delitem(sys.modules, "plugins.voice", raising=False)
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from agentic_harness import plugins as loader
+        app = FastAPI()
+        loader.load_plugins(app=app)
+
+        assert "failed to load 'plugins.voice'" in capsys.readouterr().out
+        assert TestClient(app).post("/v1/speak", json={"text": "hi"}).status_code == 404

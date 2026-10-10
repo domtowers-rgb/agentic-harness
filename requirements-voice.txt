@@ -1,0 +1,6 @@
+# Optional: the voice plugin (plugins/voice.py) - speech-to-text for voice
+# messages and spoken replies, on this machine's CPU. Without these, that
+# plugin is skipped and everything else works as normal.
+#   pip install -r requirements-voice.txt
+faster-whisper
+piper-tts

@@ -27,7 +27,10 @@ class PluginRegistry:
 registry = PluginRegistry()
 
 
-def load_plugins(path: str = None):
+def load_plugins(path: str = None, app=None):
+    """Import every module in plugins/: each may expose register(registry)
+    to add model tools, and/or register_routes(app) to add HTTP endpoints
+    (e.g. the optional voice plugin's /v1/transcribe and /v1/speak)."""
     path = path or PLUGIN_DIR
     if not os.path.isdir(path):
         return
@@ -38,6 +41,8 @@ def load_plugins(path: str = None):
             module = importlib.import_module(full_name)
             if hasattr(module, "register"):
                 module.register(registry)
+            if app is not None and hasattr(module, "register_routes"):
+                module.register_routes(app)
         except Exception as exc:
             # Keep the loader tolerant - one broken plugin (e.g. a missing
             # dependency) shouldn't take down the whole server - but never

@@ -56,6 +56,7 @@ cp .env.example .env    # then edit .env
 - `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep (an image in a message counts as about 250 tokens, not its data size), in the same rough chars/4 heuristic `_truncate_messages` uses (default `2048`). Tune this to roughly match your local model's actual configured context window. Oldest messages are dropped first, but the newest message is always kept even if it's over budget on its own (a long paste is sent rather than silently dropped), as is a leading system message.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
 - `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is put first, as the system message, on every request; if the request has its own system message (agentic-gateway uses one to explain who's in a group chat), the two are combined - personality first - since many local chat templates accept only one system message. Kept intentionally small (guideline: ~100 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
+- `AGENTIC_TTS_VOICE` / `AGENTIC_TTS_DIR` / `AGENTIC_TTS_MAX_CHARS`: the spoken-reply voice, where voices are kept, and the most text spoken per reply (see "Voice messages").
 - `AGENTIC_WHISPER_MODEL`: speech model for voice messages (default `small`; see "Voice messages").
 - `AGENTIC_ALLOWED_HOSTS`: extra hostnames the server answers to, comma-separated (see "Browser protection").
 - `AGENTIC_AUDIT_LOG`: path to the tool-call audit log (default `audit.log`). See "Audit log" below.
@@ -90,7 +91,7 @@ then `python -m agentic_harness.main`.
 
 Plugins
 
-Plugins live in the `plugins/` folder. Each module should expose a `register(registry)` function that calls `registry.register(name, callable, spec)` - `plugins/current_time.py` is a short example. Keep each `spec`'s descriptions brief: every enabled tool's definition is sent at the start of every prompt (the 12 built-in tools come to about 900 tokens on Gemma 4). Identical definitions from one prompt to the next are cached by local servers like LM Studio, so the cost is mostly paid on the first prompt after the tool list changes or the model reloads - but it's still worth not wasting.
+Plugins live in the `plugins/` folder. Each module should expose a `register(registry)` function that calls `registry.register(name, callable, spec)` (to add model tools) and/or a `register_routes(app)` function (to add HTTP endpoints, as the optional voice plugin does) - `plugins/current_time.py` is a short example. Keep each `spec`'s descriptions brief: every enabled tool's definition is sent at the start of every prompt (the 12 built-in tools come to about 900 tokens on Gemma 4). Identical definitions from one prompt to the next are cached by local servers like LM Studio, so the cost is mostly paid on the first prompt after the tool list changes or the model reloads - but it's still worth not wasting.
 
 If a plugin fails to import (most commonly: you pulled a change that added a new dependency, like `python-pptx` for `create_file`, without re-running `pip install -r requirements.txt`), it's skipped rather than crashing the server - but not silently: the server logs `[plugins] failed to load '...': ...` at startup, and it just won't show up in `/v1/plugins` or the settings dialog. If a plugin you expect is missing, check the server's startup log for that line first.
 
@@ -119,9 +120,20 @@ Additional environment variables used by the built-in plugins:
 - `AGENTIC_MAX_UPLOAD_BYTES`: largest file `POST /v1/files` accepts (default 25 MB).
 - `AGENTIC_FETCH_MAX_CHARS`: max characters of page text `fetch_url` returns (default `8000`, applied after HTML-to-text conversion). The whole result goes into the model's context, so keep it well inside your model's window.
 
-Voice messages
+Voice messages (optional plugin)
 
-`POST /v1/transcribe` with an audio file as the raw request body (any common format - Signal voice notes are AAC) returns `{"text", "language", "duration"}`, transcribed on this machine's CPU with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). agentic-gateway uses it to turn Signal voice messages into text for the model. The model (`AGENTIC_WHISPER_MODEL`, default `small`) loads on the first voice message after a start - and the very first time, downloads from Hugging Face into `~/.cache/huggingface` (`small` is about 480 MB) - so that one takes a while. Transcriptions run one at a time, since each already uses every CPU core. Without faster-whisper installed, the endpoint returns 501 and the gateway tells the model a voice message couldn't be transcribed.
+`plugins/voice.py` adds two endpoints - it's the one plugin that adds HTTP endpoints (via a `register_routes(app)` hook) rather than model tools. It's optional: its libraries aren't in `requirements.txt`. To enable it:
+
+```bash
+pip install -r requirements-voice.txt
+```
+
+Without them the plugin is skipped at startup (`[plugins] failed to load 'plugins.voice'`), the endpoints don't exist, and everything else works as normal. `GET /v1/status` lists the server's endpoints, so a client can tell whether voice is there.
+
+- `POST /v1/transcribe` - an audio file as the raw request body (any common format - Signal voice notes are AAC) returns `{"text", "language", "duration"}`, transcribed on this machine's CPU with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). The model (`AGENTIC_WHISPER_MODEL`, default `small`) loads on the first voice message after a start - and the very first time, downloads from Hugging Face into `~/.cache/huggingface` (`small` is about 480 MB). Transcriptions run one at a time, since each already uses every CPU core.
+- `POST /v1/speak` - `{"text": ...}` returns the text spoken aloud as `.m4a` audio (`audio/mp4`, the format of a Signal voice note), using [Piper](https://github.com/OHF-Voice/piper1-gpl) - about half a second for a few sentences on a modest CPU. Markdown is read sensibly (markers dropped, code and links summarised as "shown in the message") and text past `AGENTIC_TTS_MAX_CHARS` (default 1500) is cut at a sentence end. The voice (`AGENTIC_TTS_VOICE`, default `en_GB-cori-medium` - any [Piper voice](https://huggingface.co/rhasspy/piper-voices) name) downloads on first use (~60 MB) into `AGENTIC_TTS_DIR` (default `~/.cache/piper-voices`).
+
+agentic-gateway uses both to understand Signal voice messages and answer them with one.
 
 Browser protection
 

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 import uvicorn
-from . import model, plugins, transcribe
+from . import model, plugins
 import os
 import re
 import json
@@ -70,7 +70,7 @@ DEFAULT_MAX_TOKENS = int(os.environ.get("AGENTIC_DEFAULT_MAX_TOKENS", "2048"))
 HISTORY_MAX_TOKENS = int(os.environ.get("AGENTIC_HISTORY_MAX_TOKENS", "2048"))
 
 # load plugins at startup
-plugins.load_plugins()
+plugins.load_plugins(app=app)
 
 # The same sandbox the file plugins use - created files are served from,
 # and uploads saved into, it. Imported after load_plugins() so a broken
@@ -477,26 +477,6 @@ async def upload_file(request: Request, filename: str = "", user: str = ""):
     return JSONResponse(content={"path": path, "filename": target.name, "size": len(body)})
 
 
-@app.post("/v1/transcribe")
-async def transcribe_audio(request: Request):
-    """Transcribe a voice message: the audio file as the raw request body
-    (any common format), returning {"text", "language", "duration"}.
-    agentic-gateway uses it for Signal voice notes. 501 if faster-whisper
-    isn't installed. (Not OpenAI's /v1/audio/transcriptions: that one is a
-    multipart form, which would need another dependency.)"""
-    body = await request.body()
-    if not body:
-        raise HTTPException(status_code=400, detail="no audio in the request body")
-    if len(body) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
-    try:
-        return JSONResponse(content=await asyncio.to_thread(transcribe.transcribe, body))
-    except transcribe.TranscriptionUnavailable as exc:
-        raise HTTPException(status_code=501, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"couldn't transcribe that audio: {exc}")
-
-
 @app.get("/v1/files/{path:path}")
 async def download_file(path: str):
     """Download a file from the sandbox - how a client fetches what a tool
@@ -576,7 +556,11 @@ async def list_plugins():
 
 @app.get("/v1/status")
 async def status():
-    return JSONResponse(content={"backend": MODEL_BACKEND, "base_url": CURRENT_BASE_URL})
+    """Which backend is in use, plus the /v1 endpoints this server offers -
+    so a client can tell whether an optional plugin's endpoints (e.g. the
+    voice plugin's /v1/transcribe and /v1/speak) are there."""
+    endpoints = sorted({route.path for route in app.routes if getattr(route, "path", "").startswith("/v1/")})
+    return JSONResponse(content={"backend": MODEL_BACKEND, "base_url": CURRENT_BASE_URL, "endpoints": endpoints})
 
 
 @app.post("/v1/connect")
