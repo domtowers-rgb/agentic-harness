@@ -64,6 +64,13 @@ MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "8"))
 # is wasted decode time, not saved time.
 DEFAULT_MAX_TOKENS = int(os.environ.get("AGENTIC_DEFAULT_MAX_TOKENS", "2048"))
 
+# Used whenever a request doesn't set its own temperature (neither the web
+# UI nor agentic-gateway does). Was 0, which makes a model pick its single
+# likeliest word every time - and its likeliest is the stock assistant
+# phrasing ("You're welcome! Let me know if..."), the same way every time.
+# 0.7 is the usual setting for chat; tool calls still work fine at it.
+DEFAULT_TEMPERATURE = float(os.environ.get("AGENTIC_DEFAULT_TEMPERATURE", "0.7"))
+
 # load plugins at startup
 plugins.load_plugins(app=app)
 # Uploads and downloads (see files.py).
@@ -312,7 +319,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
     messages = prompt.with_personality(messages, prompt.grounding({t["function"]["name"] for t in tools_ if "function" in t}))
 
     return ChatRequest(
-        messages=messages, tools=tools_, model=model_name, temperature=body.get("temperature", 0.0),
+        messages=messages, tools=tools_, model=model_name, temperature=DEFAULT_TEMPERATURE if body.get("temperature") is None else body["temperature"],
         max_tokens=max_tokens,
         # Which chat this is for (the standard "user" field).
         sandbox=files.file_ops.chat_sandbox(files.chat_id(body.get("user"))),

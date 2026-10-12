@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 from . import model
 
 PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "SOUL.md")
-PERSONALITY_MAX_TOKENS = 100
+PERSONALITY_MAX_TOKENS = 200
 
 # How much of the conversation history to keep, in the same rough
 # chars-per-token heuristic truncate_messages uses. Tune this to roughly

@@ -438,7 +438,7 @@ def test_load_personality_warns_when_over_token_guideline(tmp_path, capsys):
     path = tmp_path / "SOUL.md"
     path.write_text("x" * 1000, encoding="utf-8")  # ~250 estimated tokens, over the 100 guideline
     prompt_mod.load_personality(str(path))
-    assert "over the 100-token guideline" in capsys.readouterr().out
+    assert "over the 200-token guideline" in capsys.readouterr().out
 
 
 def test_load_personality_no_warning_when_within_guideline(tmp_path, capsys):
