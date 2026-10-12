@@ -44,7 +44,7 @@ TTS_DIR = Path(os.environ.get("AGENTIC_TTS_DIR") or Path.home() / ".cache" / "pi
 MAX_SPOKEN_CHARS = int(os.environ.get("AGENTIC_TTS_MAX_CHARS", "1500"))
 
 _whisper = None
-_piper = None
+_pipers = {}  # Piper voice name -> loaded voice
 # One of each at a time: each already uses every CPU core, so running two
 # at once would only make both slower (and double the memory).
 _whisper_lock = threading.Lock()
@@ -138,30 +138,38 @@ def _encode_m4a(samples, rate: int) -> bytes:
     return buffer.getvalue()
 
 
+def synthesize(text: str, voice: str = None):
+    """Plain text -> (float32 samples, sample rate), in Piper voice `voice`
+    (default AGENTIC_TTS_VOICE). Each voice downloads on first use (~60 MB)
+    and stays loaded. Blocking. Also used by other plugins (the podcast
+    plugin's two hosts). Raises ValueError if there's nothing to say."""
+    import numpy as np
+
+    voice = voice or TTS_VOICE
+    with _piper_lock:
+        if voice not in _pipers:
+            from piper import PiperVoice
+            from piper.download_voices import download_voice
+            model_path = TTS_DIR / f"{voice}.onnx"
+            if not model_path.exists():
+                TTS_DIR.mkdir(parents=True, exist_ok=True)
+                download_voice(voice, TTS_DIR)
+            _pipers[voice] = PiperVoice.load(model_path)
+        chunks = list(_pipers[voice].synthesize(text))
+    if not chunks:
+        raise ValueError("nothing to say")
+    return np.concatenate([chunk.audio_float_array for chunk in chunks]), chunks[0].sample_rate
+
+
 def speak(text: str) -> bytes:
     """Reply text -> spoken .m4a audio (the format of a Signal voice note).
     Blocking - call it in a thread. Raises ValueError if there's nothing
     to say."""
-    global _piper
-    import numpy as np
-
     spoken = speakable(text)
     if not spoken:
         raise ValueError("nothing to say")
-    with _piper_lock:
-        if _piper is None:
-            from piper import PiperVoice
-            from piper.download_voices import download_voice
-            model_path = TTS_DIR / f"{TTS_VOICE}.onnx"
-            if not model_path.exists():
-                TTS_DIR.mkdir(parents=True, exist_ok=True)
-                download_voice(TTS_VOICE, TTS_DIR)
-            _piper = PiperVoice.load(model_path)
-        chunks = list(_piper.synthesize(spoken))
-    if not chunks:
-        raise ValueError("nothing to say")
-    samples = np.concatenate([chunk.audio_float_array for chunk in chunks])
-    return _encode_m4a(samples, chunks[0].sample_rate)
+    samples, rate = synthesize(spoken)
+    return _encode_m4a(samples, rate)
 
 
 # --- endpoints --------------------------------------------------------------
