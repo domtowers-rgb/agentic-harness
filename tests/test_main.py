@@ -3,6 +3,8 @@ import json
 import pytest
 
 from agentic_harness import main as main_mod, model
+from agentic_harness import prompt as prompt_mod
+from agentic_harness import tools as tools_mod
 
 
 def test_chat_completions_basic(client):
@@ -112,7 +114,7 @@ def test_tool_call_limit_asks_for_a_final_answer_with_tool_choice_none(client, m
     final_call = fake.calls[-1]
     assert final_call["tool_choice"] == "none"
     assert all(c["tool_choice"] in (None, "auto") for c in fake.calls[:-1])
-    assert final_call["messages"][-1] == main_mod.TOOL_LIMIT_NUDGE
+    assert final_call["messages"][-1] == prompt_mod.TOOL_LIMIT_NUDGE
 
 
 def test_unknown_tool_call_is_reported_back_to_the_model(client, monkeypatch):
@@ -275,6 +277,7 @@ def test_status_endpoint_mock_backend(client):
     r = client.get("/v1/status")
     assert r.status_code == 200
     assert r.json()["backend"] == "mock"
+    assert {"/v1/chat/completions", "/v1/files", "/v1/files/{path:path}", "/v1/models"} <= set(r.json()["endpoints"])
 
 
 def test_plugins_endpoint_lists_registered_plugins(client):
@@ -374,7 +377,7 @@ def test_personality_prepended_when_client_supplies_no_system_message(client, mo
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
-    monkeypatch.setattr(main_mod, "PERSONALITY", "Be concise and friendly.")
+    monkeypatch.setattr(prompt_mod, "PERSONALITY", "Be concise and friendly.")
 
     client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
 
@@ -391,7 +394,7 @@ def test_personality_is_combined_with_the_clients_own_system_message(client, mon
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
-    monkeypatch.setattr(main_mod, "PERSONALITY", "Be concise and friendly.")
+    monkeypatch.setattr(prompt_mod, "PERSONALITY", "Be concise and friendly.")
 
     client.post("/v1/chat/completions", json={
         "messages": [
@@ -414,7 +417,7 @@ def test_no_personality_configured_leaves_messages_untouched(client, monkeypatch
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
-    monkeypatch.setattr(main_mod, "PERSONALITY", "")
+    monkeypatch.setattr(prompt_mod, "PERSONALITY", "")
 
     client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
 
@@ -422,26 +425,26 @@ def test_no_personality_configured_leaves_messages_untouched(client, monkeypatch
 
 
 def test_load_personality_returns_empty_for_missing_file():
-    assert main_mod._load_personality("this/file/does/not/exist.txt") == ""
+    assert prompt_mod.load_personality("this/file/does/not/exist.txt") == ""
 
 
 def test_load_personality_strips_whitespace(tmp_path):
     path = tmp_path / "SOUL.md"
     path.write_text("  Be nice.  \n", encoding="utf-8")
-    assert main_mod._load_personality(str(path)) == "Be nice."
+    assert prompt_mod.load_personality(str(path)) == "Be nice."
 
 
 def test_load_personality_warns_when_over_token_guideline(tmp_path, capsys):
     path = tmp_path / "SOUL.md"
     path.write_text("x" * 1000, encoding="utf-8")  # ~250 estimated tokens, over the 100 guideline
-    main_mod._load_personality(str(path))
+    prompt_mod.load_personality(str(path))
     assert "over the 100-token guideline" in capsys.readouterr().out
 
 
 def test_load_personality_no_warning_when_within_guideline(tmp_path, capsys):
     path = tmp_path / "SOUL.md"
     path.write_text("Be nice.", encoding="utf-8")
-    main_mod._load_personality(str(path))
+    prompt_mod.load_personality(str(path))
     assert capsys.readouterr().out == ""
 
 
@@ -497,8 +500,8 @@ def test_history_max_tokens_is_configurable(client, monkeypatch):
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
-    monkeypatch.setattr(main_mod, "HISTORY_MAX_TOKENS", 1)  # ~4 chars of budget - forces heavy trimming
-    monkeypatch.setattr(main_mod, "PERSONALITY", "")  # isolate from the personality prepend
+    monkeypatch.setattr(prompt_mod, "HISTORY_MAX_TOKENS", 1)  # ~4 chars of budget - forces heavy trimming
+    monkeypatch.setattr(prompt_mod, "PERSONALITY", "")  # isolate from the personality prepend
 
     long_history = [{"role": "user", "content": "x" * 100} for _ in range(20)]
     client.post("/v1/chat/completions", json={"messages": long_history})
@@ -507,7 +510,7 @@ def test_history_max_tokens_is_configurable(client, monkeypatch):
 
 def test_audit_log_records_successful_tool_call(client, monkeypatch, tmp_path):
     log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setattr(tools_mod, "AUDIT_LOG_FILE", str(log_path))
 
     class ToolModel:
         def __init__(self):
@@ -540,7 +543,7 @@ def test_audit_log_records_successful_tool_call(client, monkeypatch, tmp_path):
 
 def test_audit_log_records_unknown_tool_call(client, monkeypatch, tmp_path):
     log_path = tmp_path / "audit.log"
-    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(log_path))
+    monkeypatch.setattr(tools_mod, "AUDIT_LOG_FILE", str(log_path))
 
     monkeypatch.setattr(main_mod, "model_impl", ScriptedModel(_tool_call_response("does_not_exist"), _text_response("ok")))
     client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]})
@@ -553,41 +556,41 @@ def test_audit_log_records_unknown_tool_call(client, monkeypatch, tmp_path):
 
 
 def test_audit_log_truncates_long_values():
-    result = main_mod._truncate_for_audit("x" * 1000)
+    result = tools_mod.truncate_for_audit("x" * 1000)
     assert len(result) < 1000
     assert result.endswith("...(truncated)")
 
 
 def test_audit_log_short_values_not_truncated():
-    assert main_mod._truncate_for_audit("short") == "short"
+    assert tools_mod.truncate_for_audit("short") == "short"
 
 
 def test_audit_log_write_failure_does_not_raise(monkeypatch):
-    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", "this/path/does/not/exist/audit.log")
-    main_mod._audit_log("some_tool", {"a": 1}, {"ok": True})  # must not raise
+    monkeypatch.setattr(tools_mod, "AUDIT_LOG_FILE", "this/path/does/not/exist/audit.log")
+    tools_mod.audit_log("some_tool", {"a": 1}, {"ok": True})  # must not raise
 
 
 def test_truncate_messages_drops_oldest_when_over_budget():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [{"role": "user", "content": "x" * 1000} for _ in range(50)]
     out = _truncate_messages(messages, max_tokens=10)
     assert len(out) < len(messages)
 
 
 def test_truncate_messages_keeps_short_history():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [{"role": "user", "content": "hi"}]
     assert _truncate_messages(messages, max_tokens=1000) == messages
 
 
 def test_truncate_messages_never_drops_the_newest_message():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [{"role": "user", "content": "old"}, {"role": "user", "content": "x" * 10000}]
     assert _truncate_messages(messages, max_tokens=10) == [messages[-1]]
 
 
 def test_truncate_messages_keeps_a_leading_system_message():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [{"role": "system", "content": "be terse"}] + [{"role": "user", "content": "x" * 100} for _ in range(10)]
     out = _truncate_messages(messages, max_tokens=60)
     assert out[0] == messages[0]
@@ -596,7 +599,7 @@ def test_truncate_messages_keeps_a_leading_system_message():
 
 
 def test_truncate_messages_does_not_start_on_an_orphaned_tool_result():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [
         {"role": "user", "content": "x" * 400},
         {"role": "assistant", "content": "let me check " * 5, "tool_calls": [{"id": "c1"}]},
@@ -610,7 +613,7 @@ def test_truncate_messages_does_not_start_on_an_orphaned_tool_result():
 
 
 def test_truncate_messages_tolerates_non_string_content():
-    from agentic_harness.main import _truncate_messages
+    from agentic_harness.prompt import truncate_messages as _truncate_messages
     messages = [
         {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
         {"role": "user", "content": [{"type": "text", "text": "x" * 100}]},
@@ -640,7 +643,7 @@ def test_streaming_tool_call_limit_asks_for_a_final_answer(client, monkeypatch):
         lines = [line for line in r.iter_lines() if line]
 
     assert len(rounds) == main_mod.MAX_TOOL_ITERATIONS + 1
-    assert rounds[-1] == {"tool_choice": "none", "last": main_mod.TOOL_LIMIT_NUDGE}
+    assert rounds[-1] == {"tool_choice": "none", "last": prompt_mod.TOOL_LIMIT_NUDGE}
     assert lines[-1] == "data: [DONE]"
     assert "final answer" in lines[-2]
 
@@ -943,9 +946,9 @@ class TestGrounding:
                 return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
         monkeypatch.setattr(main_mod, "model_impl", Spy())
-        monkeypatch.setattr(main_mod, "INCLUDE_GROUNDING", True)
-        monkeypatch.setattr(main_mod, "TIMEZONE", "Europe/London")
-        monkeypatch.setattr(main_mod, "PERSONALITY", "Be friendly.")
+        monkeypatch.setattr(prompt_mod, "INCLUDE_GROUNDING", True)
+        monkeypatch.setattr(prompt_mod, "TIMEZONE", "Europe/London")
+        monkeypatch.setattr(prompt_mod, "PERSONALITY", "Be friendly.")
         body = {"messages": [{"role": "user", "content": "hi"}]}
         if enabled_plugins is not None:
             body["enabled_plugins"] = enabled_plugins
@@ -974,7 +977,7 @@ class TestGrounding:
                 return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
         monkeypatch.setattr(main_mod, "model_impl", Spy())
-        monkeypatch.setattr(main_mod, "PERSONALITY", "Be friendly.")
+        monkeypatch.setattr(prompt_mod, "PERSONALITY", "Be friendly.")
         client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
         assert captured["system"] == "Be friendly."
 
@@ -988,8 +991,8 @@ class TestHistoryBudget:
                 return context
 
         monkeypatch.setattr(main_mod, "model_impl", Backend())
-        monkeypatch.setattr(main_mod, "HISTORY_MAX_TOKENS", history_max)
-        return asyncio.run(main_mod._history_budget("m", list(tools), max_tokens))
+        monkeypatch.setattr(prompt_mod, "HISTORY_MAX_TOKENS", history_max)
+        return asyncio.run(prompt_mod.history_budget(main_mod.model_impl, "m", list(tools), max_tokens))
 
     def test_capped_by_the_loaded_context(self, monkeypatch):
         tools = [{"type": "function", "function": {"name": "x" * 4000}}]  # ~1000 tokens of tool definitions
@@ -1063,7 +1066,7 @@ class TestLeakedWorking:
         ("{not json}", "{not json}"),
     ])
     def test_clean_reply(self, raw, expected):
-        assert main_mod._clean_reply(raw) == expected
+        assert prompt_mod.clean_reply(raw) == expected
 
     def _chat(self, client, monkeypatch, *replies):
         calls = []
@@ -1081,7 +1084,7 @@ class TestLeakedWorking:
         reply, calls = self._chat(client, monkeypatch, self.NOTES, "Honestly? It was short but fun.")
         assert reply == "Honestly? It was short but fun."
         assert len(calls) == 2
-        assert calls[1]["messages"][-1] == main_mod.NOTES_ONLY_NUDGE
+        assert calls[1]["messages"][-1] == prompt_mod.NOTES_ONLY_NUDGE
         assert calls[1]["messages"][-2] == {"role": "assistant", "content": self.NOTES}
 
     def test_if_it_happens_again_a_plain_apology_is_sent(self, client, monkeypatch):
@@ -1092,3 +1095,39 @@ class TestLeakedWorking:
     def test_ordinary_replies_need_no_extra_call(self, client, monkeypatch):
         reply, calls = self._chat(client, monkeypatch, "<think>hmm</think>Edinburgh.")
         assert (reply, len(calls)) == ("Edinburgh.", 1)
+
+    def _stream(self, client, monkeypatch, *replies):
+        """Each reply streamed in two pieces; returns the events sent and
+        the requests made."""
+        calls = []
+
+        class Model:
+            def chat_stream(self, messages, tools=None, **kwargs):
+                calls.append({"messages": [dict(m) for m in messages], "tool_choice": kwargs.get("tool_choice")})
+                text = replies[len(calls) - 1]
+                for piece in (text[:5], text[5:]):
+                    yield {"choices": [{"delta": {"content": piece}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        with client.stream("POST", "/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "@Niamh thoughts?"}], "stream": True,
+        }) as r:
+            events = [json.loads(line[len("data: "):]) for line in r.iter_lines() if line and line != "data: [DONE]"]
+        return events, calls
+
+    def test_streamed_working_is_replaced_with_the_cleaned_reply(self, client, monkeypatch):
+        raw = "<think>hmm</think>Edinburgh."
+        events, calls = self._stream(client, monkeypatch, raw)
+        assert events[-1] == {"replace_content": {"old": raw, "new": "Edinburgh."}}
+        assert len(calls) == 1
+
+    def test_streamed_notes_only_reply_is_cleared_and_asked_again(self, client, monkeypatch):
+        events, calls = self._stream(client, monkeypatch, self.NOTES, "Honestly? It was short but fun.")
+        assert {"replace_content": {"old": self.NOTES, "new": ""}} in events
+        assert "".join(e["choices"][0]["delta"].get("content", "") for e in events[-2:]) == "Honestly? It was short but fun."
+        assert calls[1]["messages"][-1] == prompt_mod.NOTES_ONLY_NUDGE
+        assert calls[1]["tool_choice"] == "none"
+
+    def test_streamed_clean_replies_are_left_alone(self, client, monkeypatch):
+        events, _ = self._stream(client, monkeypatch, "Edinburgh.")
+        assert not any("replace_content" in e for e in events)

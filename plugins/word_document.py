@@ -77,6 +77,6 @@ def create_document(title: str, sections: list, filename: str = None):
 
     path = str(target.relative_to(sandbox_dir()))
     # "attachment" marks this as a file to hand back to the user - see
-    # _run_tool_calls in agentic_harness/main.py.
+    # run_tool_calls in agentic_harness/tools.py.
     return {"status": "written", "path": path, "attachment": path, "section_count": len(sections), "note": DELIVERY_NOTE}
 

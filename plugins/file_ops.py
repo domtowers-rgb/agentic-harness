@@ -16,7 +16,7 @@ SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
 CHATS_DIR = "chats"
 
 # The sandbox the current request's tools work in - set around each batch
-# of tool calls by agentic_harness/main.py (using_sandbox), read by every
+# of tool calls by agentic_harness/tools.py (using_sandbox), read by every
 # file-touching plugin via sandbox_dir(). A ContextVar so concurrent
 # requests for different chats can't see each other's.
 _current_sandbox = ContextVar("current_sandbox", default=None)

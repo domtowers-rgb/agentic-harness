@@ -5,23 +5,23 @@ if __name__ == "__main__":
     from agentic_harness.config import load_env_file
     load_env_file()
 
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from starlette.middleware.trustedhost import TrustedHostMiddleware
-import uvicorn
-from . import model, plugins
-import os
-import re
-import json
 import asyncio
-import mimetypes
+import json
+import os
 import queue
 import threading
 from contextlib import aclosing
-from datetime import datetime, timezone
-from typing import List, Dict, Any, AsyncIterator, Iterator
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Dict, Iterator, List
 from urllib.parse import urlparse
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from . import files, model, plugins, prompt, tools
 
 app = FastAPI(title="Agentic LLM Harness")
 
@@ -64,18 +64,10 @@ MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "8"))
 # is wasted decode time, not saved time.
 DEFAULT_MAX_TOKENS = int(os.environ.get("AGENTIC_DEFAULT_MAX_TOKENS", "2048"))
 
-# How much of the conversation history to keep, in the same rough
-# chars-per-token heuristic _truncate_messages uses. Tune this to roughly
-# match your model's actual configured context window.
-HISTORY_MAX_TOKENS = int(os.environ.get("AGENTIC_HISTORY_MAX_TOKENS", "2048"))
-
 # load plugins at startup
 plugins.load_plugins(app=app)
-
-# The same sandbox the file plugins use - created files are served from,
-# and uploads saved into, it. Imported after load_plugins() so a broken
-# plugin elsewhere can't stop this one from loading first.
-import plugins.file_ops as file_ops  # noqa: E402
+# Uploads and downloads (see files.py).
+files.register_routes(app)
 
 # choose model implementation based on env
 MODEL_BACKEND = os.environ.get("AGENTIC_MODEL", "mock")
@@ -91,364 +83,6 @@ else:
 # (plugins are never hot-reloaded), so this never needs to be recomputed
 # per-request.
 _PLUGIN_TOOLS = [{"type": "function", "function": spec} for spec in plugins.registry.all_specs()]
-
-PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "SOUL.md")
-PERSONALITY_MAX_TOKENS = 100
-
-
-def _load_personality(path: str) -> str:
-    if not os.path.isfile(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read().strip()
-    if not text:
-        return ""
-    # Same rough ~4-chars/token heuristic used elsewhere in this file - not
-    # exact, but enough to flag "this is probably way over the intended size".
-    estimated_tokens = len(text) / 4
-    if estimated_tokens > PERSONALITY_MAX_TOKENS:
-        print(
-            f"[personality] {path} is ~{estimated_tokens:.0f} tokens (estimated), "
-            f"over the {PERSONALITY_MAX_TOKENS}-token guideline - consider trimming it. Using it as-is."
-        )
-    return text
-
-
-PERSONALITY = _load_personality(PERSONALITY_FILE)
-
-
-# What an image in a message counts as toward the history budget, in
-# characters (~4 per token, like everything else here). Vision models
-# typically spend a few hundred tokens on an image; counting its base64
-# data instead - often millions of characters - would make one photo push
-# the entire rest of the conversation out of the budget.
-IMAGE_CHARS_ESTIMATE = 1000
-
-
-def _content_chars(message: Dict[str, Any]) -> int:
-    content = message.get("content")
-    if content is None:
-        return 0  # e.g. an assistant turn that only made tool calls
-    if isinstance(content, str):
-        return len(content)
-    if isinstance(content, list):  # content parts: text and/or images
-        total = 0
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text":
-                total += len(part.get("text") or "")
-            elif isinstance(part, dict) and part.get("type") in ("image_url", "input_image", "image"):
-                total += IMAGE_CHARS_ESTIMATE
-            else:
-                total += len(json.dumps(part, default=str))
-        return total
-    return len(json.dumps(content, default=str))
-
-
-# Time zone for "today's date" in the system prompt - this machine may well
-# run on UTC while its users don't.
-TIMEZONE = os.environ.get("AGENTIC_TIMEZONE", "")
-# Set to 0 to leave the date (and the "check before guessing" line) out.
-INCLUDE_GROUNDING = os.environ.get("AGENTIC_INCLUDE_DATE", "1") != "0"
-
-
-def _today() -> str:
-    """e.g. "Monday 12 October 2026 (Europe/London)". Date only, on purpose:
-    this sits at the very start of the prompt, and anything that changes
-    there makes a local server reprocess the whole prompt instead of
-    reusing its cache - a date changes once a day, a clock every minute.
-    The model has get_current_time for the exact time."""
-    from zoneinfo import ZoneInfo
-    try:
-        now = datetime.now(ZoneInfo(TIMEZONE)) if TIMEZONE else datetime.now().astimezone()
-    except Exception:
-        now = datetime.now().astimezone()
-    return f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')} ({TIMEZONE or now.tzname()})"
-
-
-def _grounding(tool_names) -> str:
-    """Facts a local model can't know, and a nudge against guessing. Local
-    models believe it's still the year they were trained, and answer
-    confidently from stale or invented memory - one line each helps."""
-    if not INCLUDE_GROUNDING:
-        return ""
-    lines = [f"Today is {_today()}."]
-    if "web_search" in tool_names:
-        lines.append(
-            "Your knowledge has a cut-off and can be wrong: for anything current, or a fact you're not sure of, "
-            "use web_search rather than guessing - and say when you don't know."
-        )
-    return " ".join(lines)
-
-
-def _with_personality(messages: List[Dict[str, Any]], extra: str = "") -> List[Dict[str, Any]]:
-    """Put PERSONALITY (plus `extra`, e.g. today's date - see _grounding)
-    first. If the client sent its own leading system message - e.g.
-    agentic-gateway explaining who's in a group chat - they're combined
-    into one, personality first: that context adds to the personality
-    rather than replacing it, and many local chat templates accept only a
-    single system message, at the start."""
-    preamble = "\n\n".join(part for part in (PERSONALITY, extra) if part)
-    if not preamble:
-        return messages
-    if messages and messages[0].get("role") == "system":
-        own = messages[0].get("content")
-        if isinstance(own, str):
-            combined = f"{preamble}\n\n{own}" if own.strip() else preamble
-        else:  # content parts
-            combined = [{"type": "text", "text": preamble}, *(own or [])]
-        return [{**messages[0], "content": combined}] + messages[1:]
-    return [{"role": "system", "content": preamble}] + messages
-
-
-async def _history_budget(model_name, tools, max_tokens) -> int:
-    """How many tokens of history to keep: AGENTIC_HISTORY_MAX_TOKENS - but
-    if the backend says the model is loaded with a smaller context window
-    (LM Studio does), less, leaving room for the tool definitions, the
-    system prompt and the reply. Otherwise a long conversation would
-    overflow the model and fail, or be cut off by the server."""
-    if not hasattr(model_impl, "context_length"):
-        return HISTORY_MAX_TOKENS
-    try:
-        context = await asyncio.to_thread(model_impl.context_length, model_name or model.DEFAULT_MODEL)
-    except Exception:
-        context = None
-    if not context:
-        return HISTORY_MAX_TOKENS
-    tool_tokens = len(json.dumps(tools)) // 4
-    room = context - tool_tokens - max_tokens - 600  # 600: system prompt and margin
-    return max(512, min(HISTORY_MAX_TOKENS, room))
-
-
-def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
-    """Drop the oldest messages until the history fits max_tokens (very
-    simple heuristic: ~4 chars per token).
-
-    Never drops the newest message - previously, one long enough to blow
-    the budget on its own (a pasted document, say) was dropped along with
-    everything else, so the model got no question at all and answered
-    nothing in particular. Better to send it over budget and let the
-    backend complain if it really doesn't fit. A leading system message is
-    kept too, so a client's own system prompt survives a long
-    conversation instead of being the first thing trimmed. And the kept
-    history never starts with an orphaned tool result whose assistant
-    tool-call turn was dropped - backends reject that."""
-    allowed_chars = max_tokens * 4
-    if sum(_content_chars(m) for m in messages) <= allowed_chars:
-        return messages
-
-    system = messages[:1] if messages and messages[0].get("role") == "system" else []
-    rest = messages[len(system):]
-    budget = allowed_chars - sum(_content_chars(m) for m in system)
-    while len(rest) > 1 and sum(_content_chars(m) for m in rest) > budget:
-        rest.pop(0)
-    while len(rest) > 1 and rest[0].get("role") == "tool":
-        rest.pop(0)
-    return system + rest
-
-
-# Local audit trail of every tool call: what was invoked, with what
-# arguments, and what came back. Not sent anywhere - stays on this machine,
-# same trust model as workspace/. Useful for both debugging ("why did it do
-# that?") and security review, since tool calls execute automatically with
-# no approval step.
-AUDIT_LOG_FILE = os.environ.get("AGENTIC_AUDIT_LOG", "audit.log")
-AUDIT_LOG_MAX_CHARS = 500
-
-
-def _truncate_for_audit(value: Any) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, default=str)
-    if len(text) > AUDIT_LOG_MAX_CHARS:
-        return text[:AUDIT_LOG_MAX_CHARS] + "...(truncated)"
-    return text
-
-
-def _audit_log(tool_name: str, args: Any, result: Any) -> None:
-    try:
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tool": tool_name,
-            "args": _truncate_for_audit(args),
-            "result": _truncate_for_audit(result),
-        }
-        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception as exc:
-        # Never let audit logging itself break a tool call.
-        print(f"[audit] failed to write audit log entry: {exc}")
-
-
-def _call_tool(fname: str, args_text: Any):
-    """Run one tool call, returning (args, result). Any failure - an
-    unknown tool, unparseable arguments, or the plugin itself raising -
-    becomes an {"error": ...} result rather than an exception, so it goes
-    back to the model as that call's tool result (which it can recover
-    from: retry with fixed arguments, try something else, or explain)
-    instead of aborting the whole request."""
-    try:
-        args = json.loads(args_text) if isinstance(args_text, str) else args_text
-    except json.JSONDecodeError as exc:
-        return args_text, {"error": f"arguments were not valid JSON: {exc}"}
-
-    plugin = plugins.registry.get(fname)
-    if not plugin:
-        return args, {"error": f"unknown function: {fname}"}
-    if args is None:
-        args = {}
-    if not isinstance(args, dict):
-        return args, {"error": "arguments must be a JSON object of named parameters"}
-
-    # Called exactly once. (It used to be retried with the arguments as a
-    # single dict on any TypeError - but a TypeError can come from inside
-    # the plugin after it has already written a file or saved a memory,
-    # and the retry then did it twice.) A wrong or missing argument name
-    # comes back to the model as a TypeError message it can act on.
-    try:
-        return args, plugin["callable"](**args)
-    except Exception as exc:
-        return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
-
-
-def _run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None) -> List[tuple]:
-    """Execute tool_calls via the plugin registry, appending the assistant and
-    tool-result messages to `messages` in place. Blocking (plugins are plain
-    sync functions, some doing network I/O) - callers run it in a thread.
-    File plugins work in `sandbox` (the request's chat folder; the root
-    sandbox if None) - see plugins/file_ops.py.
-
-    Returns (key, path) for each file the tools created for the user: a
-    plugin marks one by including "attachment": <sandbox-relative path> in
-    its result (the document plugins do). Callers collect these with
-    _collect_attachments and pass them on - see _describe_attachments."""
-    messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
-
-    attachments = []
-    with file_ops.using_sandbox(sandbox or file_ops.SANDBOX_DIR):
-        for tool_call in tool_calls:
-            fn = tool_call.get("function", {})
-            fname = fn.get("name")
-            args, result = _call_tool(fname, fn.get("arguments") or "{}")
-            _audit_log(fname, args, result)
-            messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
-            if isinstance(result, dict) and isinstance(result.get("attachment"), str):
-                path = result["attachment"]
-                # Same tool + same title + same format = the same document,
-                # remade: seen live, a model built a presentation, then
-                # rebuilt it under a new filename in the same request, and
-                # both got sent. Different titles (or a docx and a pdf of
-                # the same one) are different documents, and all kept.
-                title = args.get("title") if isinstance(args, dict) else None
-                key = (fname, title, args.get("format")) if title else (fname, path)
-                attachments.append((key, path))
-    return attachments
-
-
-def _collect_attachments(collected: Dict[tuple, str], new: List[tuple]) -> None:
-    """Add _run_tool_calls' results to `collected`, a later version of a
-    document replacing the earlier one (moving to the end, so files keep
-    the order they were finished in)."""
-    for key, path in new:
-        collected.pop(key, None)
-        collected[key] = path
-
-
-def _describe_attachments(paths, sandbox=None) -> List[Dict[str, Any]]:
-    """What the client gets for each created file: enough to show it and
-    download it. `path` is relative to the chat's sandbox (what the model
-    sees); `url` is GET /v1/files/ + its path from the root sandbox. A path
-    listed twice is listed once; one that no longer exists is dropped."""
-    sandbox = sandbox or file_ops.SANDBOX_DIR
-    described = []
-    for path in dict.fromkeys(paths):
-        try:
-            target = file_ops.resolve_in(sandbox, path)
-        except ValueError:
-            continue
-        if not target.is_file():
-            continue
-        described.append({
-            "filename": target.name,
-            "path": path,
-            "url": f"/v1/files/{target.relative_to(file_ops.SANDBOX_DIR).as_posix()}",
-            "size": target.stat().st_size,
-            "content_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
-        })
-    return described
-
-
-def _chat_id(value) -> str:
-    """The client's chat id - the standard "user" field of a chat request,
-    or ?user= on an upload - or None. agentic-gateway sends one per Signal
-    chat; the web UI sends none."""
-    if isinstance(value, str) and value.strip() and len(value) <= 256:
-        return value.strip()
-    return None
-
-
-# Appended once MAX_TOOL_ITERATIONS is used up, for one last round with
-# tool_choice="none" - so the model gives a real answer from what it has
-# instead of the request ending on a tool-call turn with no text (which a
-# client like the Signal gateway sees as an empty reply and sends nothing).
-# A user-role message rather than a system one: several local chat
-# templates (Qwen's, for one) reject a system message anywhere but first.
-#
-# The tools stay *listed* in that round (just with tool_choice="none")
-# rather than being dropped: tested live, Gemma 4 with no tools listed
-# would sometimes still try, writing its raw tool-call syntax out as the
-# reply text. With them listed, the backend still parses such an attempt
-# into a real tool call, which the caller then replaces with a fallback.
-TOOL_LIMIT_NUDGE = {
-    "role": "user",
-    "content": (
-        "Tool calls are no longer available for this request. Do not call or write out any tool calls. "
-        "Reply now in plain text with your best answer from the results you already have, "
-        "and say what you couldn't finish."
-    ),
-}
-
-
-# Field names a model uses for its own working, not for the answer.
-_NOTES_FIELDS = {"thinking", "thought", "thoughts", "plan", "planning", "reasoning", "analysis", "notes", "reflection", "scratchpad"}
-# ...and for the answer itself, when it wraps both in one JSON object.
-_ANSWER_FIELDS = ("response", "answer", "reply", "final_answer", "final", "message", "output", "content", "text")
-NOTES_ONLY_NUDGE = {
-    "role": "user",
-    "content": "(Now write your actual reply to the message above, in plain text - not JSON, and without your notes or plan.)",
-}
-
-
-def _clean_reply(text):
-    """A reply with a model's leaked working removed. Returns the cleaned
-    text - or None if it was *only* working, with no answer in it.
-
-    - <think>...</think> blocks are removed (and anything before a stray
-      closing </think>), for models whose thinking the server doesn't
-      separate out itself.
-    - A reply that's a JSON object of working fields ({"thinking": ...,
-      "plan": ...}) has its answer field used, if it has one, or else
-      counts as no answer. Seen live with an "agent-style" model in a
-      Signal group: it replied with just its thinking and plan as JSON -
-      and, saved in history, that taught it to keep doing so.
-    JSON a user actually asked for (any other fields) is left alone."""
-    if not isinstance(text, str):
-        return text
-    if "</think>" in text:
-        text = text.rsplit("</think>", 1)[1]
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
-    if candidate.startswith("{") and candidate.endswith("}"):
-        try:
-            data = json.loads(candidate)
-        except ValueError:
-            return text
-        if isinstance(data, dict) and data:
-            keys = {k.lower() for k in data}
-            for field in _ANSWER_FIELDS:
-                value = next((v for k, v in data.items() if k.lower() == field), None)
-                if isinstance(value, str) and value.strip() and keys - {field} <= _NOTES_FIELDS:
-                    return value.strip()
-            if keys <= _NOTES_FIELDS:
-                return None
-    return text
 
 
 def _tool_limit_fallback() -> str:
@@ -530,69 +164,8 @@ async def _call_model(**kwargs) -> Dict:
             raise HTTPException(
                 status_code=404,
                 detail={"type": "model_not_found", "model": requested_model, "available_models": available},
-            )
-        raise HTTPException(status_code=502, detail=f"model backend error: {exc}")
-
-
-# Files the user sends (e.g. over Signal, via agentic-gateway) are saved
-# here, inside the same sandbox the file plugins use - so read_document
-# can then read them by the path this returns.
-UPLOAD_DIR = "uploads"
-MAX_UPLOAD_BYTES = int(os.environ.get("AGENTIC_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
-
-
-def _safe_upload_name(filename: str) -> str:
-    name = os.path.basename(filename or "").strip()
-    stem, ext = os.path.splitext(name)
-    stem = re.sub(r"[^A-Za-z0-9 ._-]", "", stem).strip(" .")[:80] or "upload"
-    ext = re.sub(r"[^A-Za-z0-9.]", "", ext)[:10]
-    return f"{stem}{ext}".replace(" ", "_")
-
-
-@app.post("/v1/files")
-async def upload_file(request: Request, filename: str = "", user: str = ""):
-    """Save the raw request body as a file in the sandbox's uploads/ folder
-    and return its workspace path. Raw body + ?filename= rather than a
-    multipart form, to avoid an extra dependency (python-multipart) for a
-    single-file upload. An existing name gets a numeric suffix rather than
-    being overwritten."""
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
-    body = await request.body()
-    if len(body) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
-
-    # Into the uploading chat's own sandbox (?user=, same id as its chat
-    # requests send), so only that chat's tools can read it.
-    sandbox = file_ops.chat_sandbox(_chat_id(user))
-    name = _safe_upload_name(filename)
-    stem, ext = os.path.splitext(name)
-    target = file_ops.resolve_in(sandbox, os.path.join(UPLOAD_DIR, name))
-    counter = 1
-    while target.exists():
-        counter += 1
-        target = file_ops.resolve_in(sandbox, os.path.join(UPLOAD_DIR, f"{stem}-{counter}{ext}"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(target.write_bytes, body)
-    path = target.relative_to(sandbox).as_posix()
-    return JSONResponse(content={"path": path, "filename": target.name, "size": len(body)})
-
-
-@app.get("/v1/files/{path:path}")
-async def download_file(path: str):
-    """Download a file from the sandbox - how a client fetches what a tool
-    created (see the "attachments" in a chat completion response). Same
-    sandbox, and same local-only trust model, as the file plugins
-    themselves: anything that can reach this server could already ask
-    read_file for the same content."""
-    try:
-        target = file_ops.resolve_in(file_ops.SANDBOX_DIR, path)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="not found")
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(target, filename=target.name)
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"model backend error: {exc}") from exc
 
 
 # One load at a time - two overlapping "make this the only model" requests
@@ -618,11 +191,11 @@ async def load_model(request: Request):
         try:
             result = await asyncio.to_thread(model_impl.load_exclusive, model_id.strip())
         except model.LoadUnavailable as exc:
-            raise HTTPException(status_code=501, detail=str(exc))
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
         except KeyError:
-            raise HTTPException(status_code=404, detail=f"no model named {model_id!r}")
+            raise HTTPException(status_code=404, detail=f"no model named {model_id!r}") from None
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"loading {model_id} failed: {exc}")
+            raise HTTPException(status_code=502, detail=f"loading {model_id} failed: {exc}") from exc
     return JSONResponse(content=result)
 
 
@@ -678,7 +251,7 @@ async def connect(request: Request):
         candidate = model.OpenAIModel(api_key=api_key, base_url=base_url)
         ids = await asyncio.to_thread(candidate.list_models)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"could not connect to {base_url}: {exc}")
+        raise HTTPException(status_code=400, detail=f"could not connect to {base_url}: {exc}") from exc
 
     model_impl = candidate
     MODEL_BACKEND = "openai"
@@ -686,17 +259,27 @@ async def connect(request: Request):
     return JSONResponse(content={"status": "connected", "base_url": base_url, "models": ids})
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    body = await request.json()
-    messages = body.get("messages") or []
-    tools = list(body.get("tools") or [])
-    stream = body.get("stream", False)
+@dataclass
+class ChatRequest:
+    """A chat request, ready for the model: history trimmed to fit, the
+    personality and date in front, and the plugin tools added."""
+    messages: List[Dict[str, Any]]
+    tools: List[Dict[str, Any]]
+    model: str
+    temperature: float
+    max_tokens: int
+    sandbox: Any  # the chat's own folder - its file tools, uploads and memory live there
+
+    def model_args(self, **extra) -> Dict[str, Any]:
+        return {
+            "messages": self.messages, "tools": self.tools, "model": self.model,
+            "temperature": self.temperature, "max_tokens": self.max_tokens, **extra,
+        }
+
+
+async def _prepare(body: Dict[str, Any]) -> ChatRequest:
+    tools_ = list(body.get("tools") or [])
     model_name = body.get("model")
-    # Which chat this is for (the standard "user" field) - its file tools,
-    # uploads and memory live in that chat's own sandbox.
-    sandbox = file_ops.chat_sandbox(_chat_id(body.get("user")))
-    temperature = body.get("temperature", 0.0)
     # `.get(..., DEFAULT_MAX_TOKENS)` alone wouldn't fall back if a client
     # sent an explicit `"max_tokens": null` - that key would still be
     # present, so .get() would return None rather than the default,
@@ -709,99 +292,49 @@ async def chat_completions(request: Request):
     # to that subset of plugin names (used by the web UI's plugin toggles);
     # omitting it means "all loaded plugins".
     enabled_plugins = body.get("enabled_plugins")
-    existing_names = {t.get("function", {}).get("name") for t in tools}
+    existing_names = {t.get("function", {}).get("name") for t in tools_}
     for tool in _PLUGIN_TOOLS:
         name = tool["function"]["name"]
         if name in existing_names:
             continue
         if enabled_plugins is not None and name not in enabled_plugins:
             continue
-        tools.append(tool)
+        tools_.append(tool)
 
     # Trim history to fit: AGENTIC_HISTORY_MAX_TOKENS, but never more than
-    # the model was actually loaded with room for (see _history_budget).
-    budget = await _history_budget(model_name, tools, max_tokens)
-    messages = _truncate_messages(messages, max_tokens=budget)
+    # the model was actually loaded with room for (see history_budget).
+    budget = await prompt.history_budget(model_impl, model_name, tools_, max_tokens)
+    messages = prompt.truncate_messages(body.get("messages") or [], max_tokens=budget)
 
-    # Personality system prompt (plus today's date - see _grounding): a
+    # Personality system prompt (plus today's date - see grounding): a
     # small, fixed addition on top of the (already-trimmed) conversation
     # budget, so it's never at risk of being trimmed away itself.
-    messages = _with_personality(messages, _grounding({t["function"]["name"] for t in tools if "function" in t}))
+    messages = prompt.with_personality(messages, prompt.grounding({t["function"]["name"] for t in tools_ if "function" in t}))
 
-    if stream:
-        async def event_stream():
-            # Stream events from model_impl.chat_stream, forwarding each chunk as-is.
-            # If the model streams tool_calls, accumulate the deltas, execute the
-            # tools once the round finishes, and continue streaming the next round
-            # in the same SSE response - repeating until a plain response comes
-            # back or the iteration cap is hit.
-            iterations = 0
-            attachment_paths = {}
-            while True:
-                tool_call_accum = {}
-                final_round = iterations >= MAX_TOOL_ITERATIONS
-                if final_round:
-                    messages.append(TOOL_LIMIT_NUDGE)
-                got_content = False
+    return ChatRequest(
+        messages=messages, tools=tools_, model=model_name, temperature=body.get("temperature", 0.0),
+        max_tokens=max_tokens,
+        # Which chat this is for (the standard "user" field).
+        sandbox=files.file_ops.chat_sandbox(files.chat_id(body.get("user"))),
+    )
 
-                stream_iter = model_impl.chat_stream(
-                    messages=messages, tools=tools, tool_choice="none" if final_round else "auto",
-                    model=model_name, temperature=temperature, max_tokens=max_tokens,
-                )
-                # aclosing: if the client goes away mid-stream (the web UI's Stop
-                # button), close the model stream right away - see _iter_in_thread.
-                async with aclosing(_iter_in_thread(stream_iter)) as chunks:
-                    async for chunk in chunks:
-                        try:
-                            yield f"data: {json.dumps(chunk)}\n\n"
-                        except Exception:
-                            # fallback to str
-                            yield f"data: {str(chunk)}\n\n"
-                            continue
 
-                        choices = chunk.get("choices") or []
-                        delta = (choices[0].get("delta") or {}) if choices else {}
-                        if delta.get("content"):
-                            got_content = True
-                        for tc_delta in delta.get("tool_calls") or []:
-                            idx = tc_delta.get("index", 0)
-                            slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
-                            if tc_delta.get("id"):
-                                slot["id"] = tc_delta["id"]
-                            fn = tc_delta.get("function") or {}
-                            if fn.get("name"):
-                                slot["name"] = fn["name"]
-                            if fn.get("arguments"):
-                                slot["arguments"] += fn["arguments"]
+def _ask_for_the_answer(messages: List[Dict[str, Any]], notes: str) -> None:
+    """The reply was only the model's working (see prompt.clean_reply):
+    ask once more, for the answer."""
+    messages += [{"role": "assistant", "content": notes}, prompt.NOTES_ONLY_NUDGE]
 
-                if final_round:
-                    if not got_content:
-                        fallback = {"choices": [{"delta": {"content": _tool_limit_fallback()}, "finish_reason": "stop"}]}
-                        yield f"data: {json.dumps(fallback)}\n\n"
-                    break
-                if not tool_call_accum:
-                    break
 
-                tool_calls = [
-                    {
-                        "id": slot["id"] or f"call_{idx}",
-                        "type": "function",
-                        "function": {"name": slot["name"], "arguments": slot["arguments"] or "{}"},
-                    }
-                    for idx, slot in sorted(tool_call_accum.items())
-                ]
-                _collect_attachments(attachment_paths, await asyncio.to_thread(_run_tool_calls, messages, tool_calls, None, sandbox))
-                iterations += 1
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    body = await request.json()
+    req = await _prepare(body)
+    if body.get("stream", False):
+        return StreamingResponse(_stream(req), media_type="text/event-stream")
+    return JSONResponse(content=await _complete(req))
 
-            attachments = _describe_attachments(attachment_paths.values(), sandbox)
-            if attachments:
-                # Not a standard chat-completion chunk - an extra event
-                # (no "choices") that clients unaware of it just skip.
-                yield f"data: {json.dumps({'attachments': attachments})}\n\n"
-            yield "data: [DONE]\n\n"
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
-
+async def _complete(req: ChatRequest) -> Dict[str, Any]:
     # Tool-calling loop: keep executing tool calls and re-prompting the model
     # until it returns a plain response. Once the iteration cap is used up,
     # one last round with tool_choice="none" asks for an answer from what it
@@ -809,7 +342,7 @@ async def chat_completions(request: Request):
     # themselves run in a thread, so neither a slow local model nor a slow
     # tool (a web fetch, say) blocks the event loop - and with it every
     # other request.
-    resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
+    resp = await _call_model(**req.model_args())
     iterations = 0
     attachment_paths = {}
     while True:
@@ -819,48 +352,133 @@ async def chat_completions(request: Request):
             break
 
         if iterations >= MAX_TOOL_ITERATIONS:
-            messages.append(TOOL_LIMIT_NUDGE)
-            resp = await _call_model(
-                messages=messages, tools=tools, tool_choice="none",
-                model=model_name, temperature=temperature, max_tokens=max_tokens,
-            )
+            req.messages.append(prompt.TOOL_LIMIT_NUDGE)
+            resp = await _call_model(**req.model_args(tool_choice="none"))
             final = resp["choices"][0].get("message") or {}
             if final.get("tool_calls") or not (final.get("content") or "").strip():
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        _collect_attachments(attachment_paths, await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"), sandbox))
-        resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
+        tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox))
+        resp = await _call_model(**req.model_args())
         iterations += 1
 
-    # Leaked working (see _clean_reply): strip it - or, if the reply was
+    # Leaked working (see clean_reply): strip it - or, if the reply was
     # nothing but working, ask once more for the actual answer.
     final = resp["choices"][0].get("message") or {}
     if not final.get("tool_calls") and isinstance(final.get("content"), str):
-        cleaned = _clean_reply(final["content"])
+        cleaned = prompt.clean_reply(final["content"])
         if cleaned is None:
-            messages += [{"role": "assistant", "content": final["content"]}, NOTES_ONLY_NUDGE]
-            resp = await _call_model(
-                messages=messages, tools=tools, tool_choice="none",
-                model=model_name, temperature=temperature, max_tokens=max_tokens,
-            )
+            _ask_for_the_answer(req.messages, final["content"])
+            resp = await _call_model(**req.model_args(tool_choice="none"))
             final = resp["choices"][0].get("message") or {}
-            cleaned = _clean_reply(final.get("content") or "")
-            if not cleaned:
-                cleaned = "Sorry, I lost my train of thought there - could you ask me again?"
+            cleaned = prompt.clean_reply(final.get("content") or "") or prompt.NO_ANSWER_REPLY
         resp["choices"][0]["message"] = {**final, "role": "assistant", "content": cleaned, "tool_calls": None}
 
     # Files created by tools this request, as an extra top-level field
     # alongside the standard ones - OpenAI-compatible clients ignore it;
     # agentic-gateway downloads and sends them on.
-    attachments = _describe_attachments(attachment_paths.values(), sandbox)
+    attachments = files.describe_attachments(attachment_paths.values(), req.sandbox)
     if attachments:
         resp["attachments"] = attachments
-    return JSONResponse(content=resp)
+    return resp
 
 
-# Serve the static chat UI. Mounted after the API route above so that route
-# takes priority over the catch-all static handler for the same path space.
+def _event(data) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
+async def _stream(req: ChatRequest):
+    """The same loop as _complete, streamed: each model chunk is forwarded
+    as-is. If the model streams tool_calls, the deltas are accumulated, the
+    tools run once the round finishes, and the next round streams in the
+    same SSE response - until a plain response comes back or the iteration
+    cap is hit.
+
+    A reply with leaked working (see clean_reply) has already been shown
+    by the time it's finished, so it's corrected after the fact: a
+    "replace_content" event ({"old", "new"}) - not a standard chunk, so
+    clients unaware of it skip it - tells the client to swap the text it
+    just streamed for the cleaned one."""
+    iterations = 0
+    attachment_paths = {}
+    tool_choice = "auto"
+    retried_for_answer = False
+    while True:
+        if tool_choice == "auto" and iterations >= MAX_TOOL_ITERATIONS:
+            req.messages.append(prompt.TOOL_LIMIT_NUDGE)
+            tool_choice = "none"
+        tool_call_accum = {}
+        content = []
+
+        stream_iter = model_impl.chat_stream(**req.model_args(tool_choice=tool_choice))
+        # aclosing: if the client goes away mid-stream (the web UI's Stop
+        # button), close the model stream right away - see _iter_in_thread.
+        async with aclosing(_iter_in_thread(stream_iter)) as chunks:
+            async for chunk in chunks:
+                try:
+                    yield _event(chunk)
+                except Exception:
+                    # fallback to str
+                    yield f"data: {str(chunk)}\n\n"
+                    continue
+
+                choices = chunk.get("choices") or []
+                delta = (choices[0].get("delta") or {}) if choices else {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                    if tc_delta.get("id"):
+                        slot["id"] = tc_delta["id"]
+                    fn = tc_delta.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+
+        if tool_choice == "auto" and tool_call_accum:
+            tool_calls = [
+                {
+                    "id": slot["id"] or f"call_{idx}",
+                    "type": "function",
+                    "function": {"name": slot["name"], "arguments": slot["arguments"] or "{}"},
+                }
+                for idx, slot in sorted(tool_call_accum.items())
+            ]
+            tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox))
+            iterations += 1
+            continue
+
+        # The final round.
+        text = "".join(content)
+        if not text:
+            if tool_choice == "none":
+                fallback = prompt.NO_ANSWER_REPLY if retried_for_answer else _tool_limit_fallback()
+                yield _event({"choices": [{"delta": {"content": fallback}, "finish_reason": "stop"}]})
+            break
+        cleaned = prompt.clean_reply(text)
+        if cleaned is None and not retried_for_answer:
+            yield _event({"replace_content": {"old": text, "new": ""}})
+            _ask_for_the_answer(req.messages, text)
+            retried_for_answer, tool_choice = True, "none"
+            continue
+        cleaned = cleaned or prompt.NO_ANSWER_REPLY
+        if cleaned != text:
+            yield _event({"replace_content": {"old": text, "new": cleaned}})
+        break
+
+    attachments = files.describe_attachments(attachment_paths.values(), req.sandbox)
+    if attachments:
+        # Not a standard chat-completion chunk - an extra event
+        # (no "choices") that clients unaware of it just skip.
+        yield _event({"attachments": attachments})
+    yield "data: [DONE]\n\n"
+
+
+# Serve the static chat UI. Mounted after the API routes above so they take
+# priority over the catch-all static handler for the same path space.
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
 
 

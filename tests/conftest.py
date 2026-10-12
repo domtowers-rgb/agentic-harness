@@ -11,6 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentic_harness import main as main_mod
+from agentic_harness import prompt as prompt_mod
+from agentic_harness import tools as tools_mod
 
 
 @pytest.fixture(autouse=True)
@@ -19,14 +21,14 @@ def _isolate_audit_log(tmp_path, monkeypatch):
     that exercise the tool-call loop (most of them) don't write into the
     real project's audit.log as a side effect of running the suite. Tests
     that specifically test audit logging override this themselves."""
-    monkeypatch.setattr(main_mod, "AUDIT_LOG_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(tools_mod, "AUDIT_LOG_FILE", str(tmp_path / "audit.log"))
 
 
 @pytest.fixture(autouse=True)
 def _no_date_line(monkeypatch):
     """Leave today's date out of the system prompt in tests (it changes by
     the day); tests that need it switch it back on."""
-    monkeypatch.setattr(main_mod, "INCLUDE_GROUNDING", False)
+    monkeypatch.setattr(prompt_mod, "INCLUDE_GROUNDING", False)
 
 
 @pytest.fixture(autouse=True)

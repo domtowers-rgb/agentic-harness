@@ -8,6 +8,8 @@ import pytest
 import plugins.file_ops as file_ops
 import plugins.voice as voice
 from agentic_harness import main as main_mod
+from agentic_harness import prompt as prompt_mod
+from agentic_harness import files as files_mod
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +64,7 @@ class TestUploadAndDownload:
         assert client.post("/v1/files", content=b"x").json()["path"] == "uploads/upload"
 
     def test_upload_over_the_size_limit_is_rejected(self, client, monkeypatch, sandbox):
-        monkeypatch.setattr(main_mod, "MAX_UPLOAD_BYTES", 4)
+        monkeypatch.setattr(files_mod, "MAX_UPLOAD_BYTES", 4)
         r = client.post("/v1/files", params={"filename": "big.bin"}, content=b"12345")
         assert r.status_code == 413
         assert not (sandbox / "uploads").exists()
@@ -375,10 +377,10 @@ class TestRemadeDocuments:
 def test_images_count_as_a_fixed_size_in_history_trimming():
     image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 2_000_000}}
     message = {"role": "user", "content": [{"type": "text", "text": "what is this?"}, image]}
-    assert main_mod._content_chars(message) == len("what is this?") + main_mod.IMAGE_CHARS_ESTIMATE
+    assert prompt_mod.content_chars(message) == len("what is this?") + prompt_mod.IMAGE_CHARS_ESTIMATE
     older = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
     # A big photo no longer pushes the rest of the conversation out.
-    assert main_mod._truncate_messages(older + [message], max_tokens=2048) == older + [message]
+    assert prompt_mod.truncate_messages(older + [message], max_tokens=2048) == older + [message]
 
 
 class TestCreateFile:

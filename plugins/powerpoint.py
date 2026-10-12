@@ -64,6 +64,6 @@ def create_presentation(title: str, slides: list, subtitle: str = None, filename
 
     path = str(target.relative_to(sandbox_dir()))
     # "attachment" marks this as a file to hand back to the user - see
-    # _run_tool_calls in agentic_harness/main.py.
+    # run_tool_calls in agentic_harness/tools.py.
     return {"status": "written", "path": path, "attachment": path, "slide_count": len(slides) + 1, "note": DELIVERY_NOTE}
 

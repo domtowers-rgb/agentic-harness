@@ -569,6 +569,17 @@ async function submit() {
           continue;
         }
 
+        if (chunk.replace_content) {
+          // The reply just streamed had the model's working in it (e.g.
+          // <think> tags) - swap it for the cleaned version.
+          const { old, new: cleaned } = chunk.replace_content;
+          if (assistantText.endsWith(old)) {
+            assistantText = assistantText.slice(0, assistantText.length - old.length) + cleaned;
+            assistantEl.innerHTML = renderMarkdown(assistantText);
+          }
+          continue;
+        }
+
         const choice = (chunk.choices || [])[0] || {};
         const delta = choice.delta || {};
 
