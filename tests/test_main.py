@@ -931,3 +931,164 @@ class TestLoadEndpoint:
 
     def test_cross_site_requests_are_refused(self, client):
         assert client.post("/v1/models/load", json={"model": "x"}, headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+class TestGrounding:
+    def _system_prompt(self, client, monkeypatch, enabled_plugins=None):
+        captured = {}
+
+        class Spy:
+            def chat(self, messages, tools=None, **kwargs):
+                captured["system"] = messages[0]["content"] if messages[0]["role"] == "system" else None
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Spy())
+        monkeypatch.setattr(main_mod, "INCLUDE_GROUNDING", True)
+        monkeypatch.setattr(main_mod, "TIMEZONE", "Europe/London")
+        monkeypatch.setattr(main_mod, "PERSONALITY", "Be friendly.")
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        if enabled_plugins is not None:
+            body["enabled_plugins"] = enabled_plugins
+        client.post("/v1/chat/completions", json=body)
+        return captured["system"]
+
+    def test_todays_date_is_in_the_system_prompt(self, client, monkeypatch):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Europe/London"))
+        system = self._system_prompt(client, monkeypatch)
+        assert system.startswith("Be friendly.\n\nToday is ")
+        assert f"{now.day} {now.strftime('%B %Y')} (Europe/London)." in system
+        assert ":" not in system.split("Today is ")[1].split(".")[0]  # date only - no clock time
+
+    def test_search_nudge_only_when_web_search_is_available(self, client, monkeypatch):
+        assert "use web_search rather than guessing" in self._system_prompt(client, monkeypatch)
+        assert "web_search" not in self._system_prompt(client, monkeypatch, enabled_plugins=["calculate"])
+
+    def test_can_be_switched_off(self, client, monkeypatch):
+        captured = {}
+
+        class Spy:
+            def chat(self, messages, tools=None, **kwargs):
+                captured["system"] = messages[0]["content"]
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Spy())
+        monkeypatch.setattr(main_mod, "PERSONALITY", "Be friendly.")
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert captured["system"] == "Be friendly."
+
+
+class TestHistoryBudget:
+    def _budget(self, monkeypatch, context, history_max=16000, max_tokens=2048, tools=()):
+        import asyncio
+
+        class Backend:
+            def context_length(self, model_id):
+                return context
+
+        monkeypatch.setattr(main_mod, "model_impl", Backend())
+        monkeypatch.setattr(main_mod, "HISTORY_MAX_TOKENS", history_max)
+        return asyncio.run(main_mod._history_budget("m", list(tools), max_tokens))
+
+    def test_capped_by_the_loaded_context(self, monkeypatch):
+        tools = [{"type": "function", "function": {"name": "x" * 4000}}]  # ~1000 tokens of tool definitions
+        budget = self._budget(monkeypatch, context=8192, tools=tools)
+        assert budget < 8192 - 2048 - 1000
+        assert budget > 3000
+
+    def test_setting_wins_when_the_context_is_big(self, monkeypatch):
+        assert self._budget(monkeypatch, context=262144) == 16000
+
+    def test_unknown_context_uses_the_setting(self, monkeypatch):
+        assert self._budget(monkeypatch, context=None) == 16000
+
+    def test_never_below_a_floor(self, monkeypatch):
+        assert self._budget(monkeypatch, context=2048, max_tokens=4096) == 512
+
+
+class TestLoadContextLength:
+    def _backend(self, monkeypatch, studio):
+        monkeypatch.setattr(model.httpx, "get", studio.get)
+        monkeypatch.setattr(model.httpx, "post", studio.post)
+        return model.OpenAIModel(base_url="http://10.0.0.5:1234/v1")
+
+    def test_loads_with_the_configured_context(self, monkeypatch):
+        monkeypatch.setenv("AGENTIC_LOAD_CONTEXT_LENGTH", "32768")
+        studio = FakeLMStudio(loaded=())
+        self._backend(monkeypatch, studio).load_exclusive("seeing")
+        assert ("POST", "/api/v1/models/load", {"model": "seeing", "context_length": 32768}) in studio.calls
+
+    def test_reloads_a_copy_loaded_with_less(self, monkeypatch):
+        monkeypatch.setenv("AGENTIC_LOAD_CONTEXT_LENGTH", "32768")
+        studio = FakeLMStudio(loaded=("small",))  # FakeLMStudio's instances have no context recorded = less
+        result = self._backend(monkeypatch, studio).load_exclusive("small")
+        assert result["already_loaded"] is False
+        posts = [c for c in studio.calls if c[0] == "POST"]
+        assert posts == [("POST", "/api/v1/models/unload", {"instance_id": "small"}),
+                         ("POST", "/api/v1/models/load", {"model": "small", "context_length": 32768})]
+
+    def test_without_the_setting_nothing_changes(self, monkeypatch):
+        monkeypatch.delenv("AGENTIC_LOAD_CONTEXT_LENGTH", raising=False)
+        studio = FakeLMStudio(loaded=())
+        self._backend(monkeypatch, studio).load_exclusive("seeing")
+        assert ("POST", "/api/v1/models/load", {"model": "seeing"}) in studio.calls
+
+    def test_context_length_is_read_from_lm_studio(self, monkeypatch):
+        import httpx
+
+        def fake_get(url, timeout=None):
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"models": [
+                {"key": "big", "loaded_instances": [{"id": "big", "config": {"context_length": 32768}}]},
+                {"key": "idle", "loaded_instances": []},
+            ]})
+
+        monkeypatch.setattr(model.httpx, "get", fake_get)
+        backend = model.OpenAIModel(base_url="http://10.0.0.5:1234/v1")
+        assert (backend.context_length("big"), backend.context_length("idle")) == (32768, None)
+
+
+class TestLeakedWorking:
+    NOTES = '{"thinking": "Robert is asking Niamh directly...", "plan": "Give Robert an honest evaluation."}'
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("Edinburgh.", "Edinburgh."),
+        ("<think>The user wants the capital.</think>\nEdinburgh.", "Edinburgh."),
+        ("wants the capital, so...</think>Edinburgh.", "Edinburgh."),  # opening tag added by the template
+        ('{"thinking": "easy one", "response": "Edinburgh."}', "Edinburgh."),
+        ('```json\n{"plan": "answer briefly", "answer": "Edinburgh."}\n```', "Edinburgh."),
+        (NOTES, None),
+        ('{"name": "Dom", "age": 40}', '{"name": "Dom", "age": 40}'),  # JSON the user asked for
+        ('{"response": "x", "data": [1, 2]}', '{"response": "x", "data": [1, 2]}'),
+        ("{not json}", "{not json}"),
+    ])
+    def test_clean_reply(self, raw, expected):
+        assert main_mod._clean_reply(raw) == expected
+
+    def _chat(self, client, monkeypatch, *replies):
+        calls = []
+
+        class Model:
+            def chat(self, messages, tools=None, **kwargs):
+                calls.append({"messages": [dict(m) for m in messages], "tool_choice": kwargs.get("tool_choice")})
+                return {"choices": [{"message": {"role": "assistant", "content": replies[len(calls) - 1]}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        body = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "@Niamh thoughts?"}]}).json()
+        return body["choices"][0]["message"]["content"], calls
+
+    def test_notes_only_reply_is_followed_by_one_more_ask(self, client, monkeypatch):
+        reply, calls = self._chat(client, monkeypatch, self.NOTES, "Honestly? It was short but fun.")
+        assert reply == "Honestly? It was short but fun."
+        assert len(calls) == 2
+        assert calls[1]["messages"][-1] == main_mod.NOTES_ONLY_NUDGE
+        assert calls[1]["messages"][-2] == {"role": "assistant", "content": self.NOTES}
+
+    def test_if_it_happens_again_a_plain_apology_is_sent(self, client, monkeypatch):
+        reply, calls = self._chat(client, monkeypatch, self.NOTES, self.NOTES)
+        assert reply.startswith("Sorry, I lost my train of thought")
+        assert len(calls) == 2  # only one extra try
+
+    def test_ordinary_replies_need_no_extra_call(self, client, monkeypatch):
+        reply, calls = self._chat(client, monkeypatch, "<think>hmm</think>Edinburgh.")
+        assert (reply, len(calls)) == ("Edinburgh.", 1)

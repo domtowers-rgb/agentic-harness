@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any, Iterator
 import os
+import time
 
 import httpx
 try:
@@ -39,6 +40,11 @@ class BaseModel:
     def model_details(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """Extra facts per model id - {"loaded": bool, "type": ...} - where
         the server can say; None where it can't."""
+        return None
+
+    def context_length(self, model_id: str) -> Optional[int]:
+        """The context window the model is currently loaded with, if the
+        server says; None where it can't (or it isn't loaded)."""
         return None
 
 
@@ -95,6 +101,30 @@ class OpenAIModel(BaseModel):
         root = self.base_url.rstrip("/")
         return root[:-len("/v1")] if root.endswith("/v1") else root
 
+    _CONTEXT_CACHE_SECONDS = 30
+
+    def context_length(self, model_id: str) -> Optional[int]:
+        """LM Studio: the context length `model_id` is loaded with (from
+        /api/v1/models), cached briefly - it's asked on every request."""
+        now = time.monotonic()
+        cache = getattr(self, "_context_cache", None)
+        if cache is None or now - cache[0] > self._CONTEXT_CACHE_SECONDS:
+            lengths = {}
+            root = self._lmstudio_root()
+            if root:
+                try:
+                    resp = httpx.get(f"{root}/api/v1/models", timeout=5)
+                    resp.raise_for_status()
+                    for m in resp.json().get("models") or []:
+                        for instance in m.get("loaded_instances") or []:
+                            length = (instance.get("config") or {}).get("context_length")
+                            if length:
+                                lengths[m["key"]] = length
+                except Exception:
+                    pass
+            cache = self._context_cache = (now, lengths)
+        return cache[1].get(model_id)
+
     def load_exclusive(self, model_id: str) -> Dict[str, Any]:
         """Make `model_id` the only chat model loaded in LM Studio: eject
         every other loaded chat model first (freeing their memory), then
@@ -126,11 +156,24 @@ class OpenAIModel(BaseModel):
                 _lmstudio_post(f"{root}/api/v1/models/unload", {"instance_id": instance["id"]}, timeout=120)
                 unloaded.append(m["key"])
 
-        already_loaded = bool(target.get("loaded_instances"))
+        # AGENTIC_LOAD_CONTEXT_LENGTH: load with this much context (more
+        # memory, longer conversations and documents). A copy already loaded
+        # with less is reloaded with it.
+        wanted = int(os.environ.get("AGENTIC_LOAD_CONTEXT_LENGTH", "0") or 0)
+        instances = target.get("loaded_instances") or []
+        if wanted and instances and all((i.get("config") or {}).get("context_length", 0) < wanted for i in instances):
+            for instance in instances:
+                _lmstudio_post(f"{root}/api/v1/models/unload", {"instance_id": instance["id"]}, timeout=120)
+            instances = []
+        already_loaded = bool(instances)
         load_seconds = None
         if not already_loaded:
-            result = _lmstudio_post(f"{root}/api/v1/models/load", {"model": model_id}, timeout=600)
+            body = {"model": model_id}
+            if wanted:
+                body["context_length"] = wanted
+            result = _lmstudio_post(f"{root}/api/v1/models/load", body, timeout=600)
             load_seconds = result.get("load_time_seconds")
+        self._context_cache = None  # what's loaded just changed
         return {
             "model": model_id, "unloaded": list(dict.fromkeys(unloaded)),
             "already_loaded": already_loaded, "load_time_seconds": load_seconds,

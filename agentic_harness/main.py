@@ -144,22 +144,79 @@ def _content_chars(message: Dict[str, Any]) -> int:
     return len(json.dumps(content, default=str))
 
 
-def _with_personality(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Put PERSONALITY first. If the client sent its own leading system
-    message - e.g. agentic-gateway explaining who's in a group chat - the
-    two are combined into one, personality first: that context adds to the
-    personality rather than replacing it, and many local chat templates
-    accept only a single system message, at the start."""
-    if not PERSONALITY:
+# Time zone for "today's date" in the system prompt - this machine may well
+# run on UTC while its users don't.
+TIMEZONE = os.environ.get("AGENTIC_TIMEZONE", "")
+# Set to 0 to leave the date (and the "check before guessing" line) out.
+INCLUDE_GROUNDING = os.environ.get("AGENTIC_INCLUDE_DATE", "1") != "0"
+
+
+def _today() -> str:
+    """e.g. "Monday 12 October 2026 (Europe/London)". Date only, on purpose:
+    this sits at the very start of the prompt, and anything that changes
+    there makes a local server reprocess the whole prompt instead of
+    reusing its cache - a date changes once a day, a clock every minute.
+    The model has get_current_time for the exact time."""
+    from zoneinfo import ZoneInfo
+    try:
+        now = datetime.now(ZoneInfo(TIMEZONE)) if TIMEZONE else datetime.now().astimezone()
+    except Exception:
+        now = datetime.now().astimezone()
+    return f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')} ({TIMEZONE or now.tzname()})"
+
+
+def _grounding(tool_names) -> str:
+    """Facts a local model can't know, and a nudge against guessing. Local
+    models believe it's still the year they were trained, and answer
+    confidently from stale or invented memory - one line each helps."""
+    if not INCLUDE_GROUNDING:
+        return ""
+    lines = [f"Today is {_today()}."]
+    if "web_search" in tool_names:
+        lines.append(
+            "Your knowledge has a cut-off and can be wrong: for anything current, or a fact you're not sure of, "
+            "use web_search rather than guessing - and say when you don't know."
+        )
+    return " ".join(lines)
+
+
+def _with_personality(messages: List[Dict[str, Any]], extra: str = "") -> List[Dict[str, Any]]:
+    """Put PERSONALITY (plus `extra`, e.g. today's date - see _grounding)
+    first. If the client sent its own leading system message - e.g.
+    agentic-gateway explaining who's in a group chat - they're combined
+    into one, personality first: that context adds to the personality
+    rather than replacing it, and many local chat templates accept only a
+    single system message, at the start."""
+    preamble = "\n\n".join(part for part in (PERSONALITY, extra) if part)
+    if not preamble:
         return messages
     if messages and messages[0].get("role") == "system":
         own = messages[0].get("content")
         if isinstance(own, str):
-            combined = f"{PERSONALITY}\n\n{own}" if own.strip() else PERSONALITY
+            combined = f"{preamble}\n\n{own}" if own.strip() else preamble
         else:  # content parts
-            combined = [{"type": "text", "text": PERSONALITY}, *(own or [])]
+            combined = [{"type": "text", "text": preamble}, *(own or [])]
         return [{**messages[0], "content": combined}] + messages[1:]
-    return [{"role": "system", "content": PERSONALITY}] + messages
+    return [{"role": "system", "content": preamble}] + messages
+
+
+async def _history_budget(model_name, tools, max_tokens) -> int:
+    """How many tokens of history to keep: AGENTIC_HISTORY_MAX_TOKENS - but
+    if the backend says the model is loaded with a smaller context window
+    (LM Studio does), less, leaving room for the tool definitions, the
+    system prompt and the reply. Otherwise a long conversation would
+    overflow the model and fail, or be cut off by the server."""
+    if not hasattr(model_impl, "context_length"):
+        return HISTORY_MAX_TOKENS
+    try:
+        context = await asyncio.to_thread(model_impl.context_length, model_name or model.DEFAULT_MODEL)
+    except Exception:
+        context = None
+    if not context:
+        return HISTORY_MAX_TOKENS
+    tool_tokens = len(json.dumps(tools)) // 4
+    room = context - tool_tokens - max_tokens - 600  # 600: system prompt and margin
+    return max(512, min(HISTORY_MAX_TOKENS, room))
 
 
 def _truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
@@ -347,6 +404,51 @@ TOOL_LIMIT_NUDGE = {
         "and say what you couldn't finish."
     ),
 }
+
+
+# Field names a model uses for its own working, not for the answer.
+_NOTES_FIELDS = {"thinking", "thought", "thoughts", "plan", "planning", "reasoning", "analysis", "notes", "reflection", "scratchpad"}
+# ...and for the answer itself, when it wraps both in one JSON object.
+_ANSWER_FIELDS = ("response", "answer", "reply", "final_answer", "final", "message", "output", "content", "text")
+NOTES_ONLY_NUDGE = {
+    "role": "user",
+    "content": "(Now write your actual reply to the message above, in plain text - not JSON, and without your notes or plan.)",
+}
+
+
+def _clean_reply(text):
+    """A reply with a model's leaked working removed. Returns the cleaned
+    text - or None if it was *only* working, with no answer in it.
+
+    - <think>...</think> blocks are removed (and anything before a stray
+      closing </think>), for models whose thinking the server doesn't
+      separate out itself.
+    - A reply that's a JSON object of working fields ({"thinking": ...,
+      "plan": ...}) has its answer field used, if it has one, or else
+      counts as no answer. Seen live with an "agent-style" model in a
+      Signal group: it replied with just its thinking and plan as JSON -
+      and, saved in history, that taught it to keep doing so.
+    JSON a user actually asked for (any other fields) is left alone."""
+    if not isinstance(text, str):
+        return text
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+    if candidate.startswith("{") and candidate.endswith("}"):
+        try:
+            data = json.loads(candidate)
+        except ValueError:
+            return text
+        if isinstance(data, dict) and data:
+            keys = {k.lower() for k in data}
+            for field in _ANSWER_FIELDS:
+                value = next((v for k, v in data.items() if k.lower() == field), None)
+                if isinstance(value, str) and value.strip() and keys - {field} <= _NOTES_FIELDS:
+                    return value.strip()
+            if keys <= _NOTES_FIELDS:
+                return None
+    return text
 
 
 def _tool_limit_fallback() -> str:
@@ -616,13 +718,15 @@ async def chat_completions(request: Request):
             continue
         tools.append(tool)
 
-    # token-frugal trimming
-    messages = _truncate_messages(messages, max_tokens=HISTORY_MAX_TOKENS)
+    # Trim history to fit: AGENTIC_HISTORY_MAX_TOKENS, but never more than
+    # the model was actually loaded with room for (see _history_budget).
+    budget = await _history_budget(model_name, tools, max_tokens)
+    messages = _truncate_messages(messages, max_tokens=budget)
 
-    # Personality system prompt: a small, fixed addition on top of the
-    # (already-trimmed) conversation budget, so it's never at risk of being
-    # trimmed away itself.
-    messages = _with_personality(messages)
+    # Personality system prompt (plus today's date - see _grounding): a
+    # small, fixed addition on top of the (already-trimmed) conversation
+    # budget, so it's never at risk of being trimmed away itself.
+    messages = _with_personality(messages, _grounding({t["function"]["name"] for t in tools if "function" in t}))
 
     if stream:
         async def event_stream():
@@ -728,6 +832,23 @@ async def chat_completions(request: Request):
         _collect_attachments(attachment_paths, await asyncio.to_thread(_run_tool_calls, messages, tool_calls, message.get("content"), sandbox))
         resp = await _call_model(messages=messages, tools=tools, model=model_name, temperature=temperature, max_tokens=max_tokens)
         iterations += 1
+
+    # Leaked working (see _clean_reply): strip it - or, if the reply was
+    # nothing but working, ask once more for the actual answer.
+    final = resp["choices"][0].get("message") or {}
+    if not final.get("tool_calls") and isinstance(final.get("content"), str):
+        cleaned = _clean_reply(final["content"])
+        if cleaned is None:
+            messages += [{"role": "assistant", "content": final["content"]}, NOTES_ONLY_NUDGE]
+            resp = await _call_model(
+                messages=messages, tools=tools, tool_choice="none",
+                model=model_name, temperature=temperature, max_tokens=max_tokens,
+            )
+            final = resp["choices"][0].get("message") or {}
+            cleaned = _clean_reply(final.get("content") or "")
+            if not cleaned:
+                cleaned = "Sorry, I lost my train of thought there - could you ask me again?"
+        resp["choices"][0]["message"] = {**final, "role": "assistant", "content": cleaned, "tool_calls": None}
 
     # Files created by tools this request, as an extra top-level field
     # alongside the standard ones - OpenAI-compatible clients ignore it;

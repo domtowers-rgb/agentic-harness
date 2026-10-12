@@ -23,6 +23,13 @@ def _isolate_audit_log(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_date_line(monkeypatch):
+    """Leave today's date out of the system prompt in tests (it changes by
+    the day); tests that need it switch it back on."""
+    monkeypatch.setattr(main_mod, "INCLUDE_GROUNDING", False)
+
+
+@pytest.fixture(autouse=True)
 def hello_tool(monkeypatch):
     """A trivial tool the tool-loop tests can call by name. (It used to
     be a real example plugin, but every loaded plugin's definition is
