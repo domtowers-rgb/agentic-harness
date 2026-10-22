@@ -36,6 +36,20 @@ python -m agentic_harness.main
 
 3. Use the OpenAI-compatible endpoint at `http://127.0.0.1:8000/v1/chat/completions`, or open `http://127.0.0.1:8000/` in a browser for a minimal built-in chat UI - it renders assistant markdown (code blocks, lists, bold/italic, links) and saves conversations to your browser's local storage (per-browser, not synced anywhere), listed in the sidebar and restored automatically when you reopen the page.
 
+Running as a service
+
+To keep it running - started at boot, restarted if it stops - run it as a systemd user service. `deploy/agentic-harness.service` assumes the project is at `~/agentic-harness` with its `venv`; edit the paths if not.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/agentic-harness.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now agentic-harness
+sudo loginctl enable-linger $USER
+```
+
+The last line lets it start at boot without you logging in (once is enough). Then `systemctl --user status agentic-harness` shows whether it's running, `journalctl --user -u agentic-harness -f` follows its log, and `systemctl --user restart agentic-harness` picks up code or `.env` changes.
+
 Configuration
 
 Settings are read from a `.env` file in the project folder at startup, so nothing needs exporting first and the LM Studio connection survives a restart:
@@ -70,7 +84,7 @@ cp .env.example .env    # then edit .env
 
 `POST /v1/models/load` with `{"model": "<id>"}` makes that the only chat model loaded on an LM Studio backend: every other loaded chat model is ejected first (embedding models are left alone), then it's loaded unless it already is - via LM Studio's own `/api/v1/models` management API. Returns `{"model", "unloaded", "already_loaded", "load_time_seconds"}`; 501 for other backends, 404 for an unknown model, 502 with LM Studio's reason if loading fails. It affects everything using that LM Studio, not just the caller; one load runs at a time.
 
-**Leaked working is cleaned out of replies** (non-streaming requests, i.e. agentic-gateway's): `<think>...</think>` blocks the server didn't separate out are removed, and a reply that's just a JSON object of the model's working - `{"thinking": ..., "plan": ...}`, as some "agent-style" models produce - has its answer field used if it has one, or otherwise the model is asked once more for its actual reply in plain text. Seen live in a Signal group: such a reply, saved in history, taught the model to keep doing it. JSON a user actually asked for is left alone.
+**Leaked working is cleaned out of replies**: `<think>...</think>` blocks the server didn't separate out are removed, and a reply that's just a JSON object of the model's working - `{"thinking": ..., "plan": ...}`, as some "agent-style" models produce - has its answer field used if it has one, or otherwise the model is asked once more for its actual reply in plain text. Seen live in a Signal group: such a reply, saved in history, taught the model to keep doing it. JSON a user actually asked for is left alone. A streamed reply has already been sent by the time it's finished, so it's corrected afterwards with an extra `replace_content` event (`{"old", "new"}`), which the web UI applies and other clients skip.
 
 **If the requested model isn't loaded on the backend** (e.g. `AGENTIC_DEFAULT_MODEL` names a model that isn't actually running in LM Studio), `/v1/chat/completions` (non-streaming only) returns `404` with a machine-readable body instead of an opaque `500`:
 
@@ -177,7 +191,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Runs on push/PR via GitHub Actions (`.github/workflows/tests.yml`). A couple of `fetch_url` tests hit a real public URL (`example.com`) and skip themselves if the network is unavailable rather than failing.
+Runs on push/PR via GitHub Actions (`.github/workflows/tests.yml`). The voice and podcast tests skip themselves where the optional voice libraries (`requirements-voice.txt`) aren't installed - as in CI. A couple of `fetch_url` tests hit a real public URL (`example.com`) and skip themselves if the network is unavailable rather than failing.
 
 Performance with local models
 

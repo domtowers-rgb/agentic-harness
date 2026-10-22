@@ -1,0 +1,14 @@
+# systemd user service: starts the harness at boot and restarts it if it
+# stops. Assumes the project is at ~/agentic-harness with its venv - adjust
+# the paths if not. Install: see "Running as a service" in the README.
+[Unit]
+Description=Agentic LLM Harness
+
+[Service]
+WorkingDirectory=%h/agentic-harness
+ExecStart=%h/agentic-harness/venv/bin/python -m agentic_harness.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
