@@ -20,6 +20,9 @@ CHATS_DIR = "chats"
 # file-touching plugin via sandbox_dir(). A ContextVar so concurrent
 # requests for different chats can't see each other's.
 _current_sandbox = ContextVar("current_sandbox", default=None)
+# ...and which chat it's for (the request's "user" id, e.g. agentic-gateway's
+# "signal:<chat>"), for plugins that act on the chat itself - reminders.
+_current_chat = ContextVar("current_chat", default=None)
 
 MAX_READ_CHARS = 200_000
 MAX_WRITE_CHARS = 200_000
@@ -55,14 +58,22 @@ def chat_sandbox(chat_id) -> Path:
 
 
 @contextmanager
-def using_sandbox(path: Path):
-    """Make `path` the sandbox for file plugins called inside this block."""
+def using_sandbox(path: Path, chat: str = None):
+    """Make `path` the sandbox for file plugins called inside this block,
+    and `chat` the chat they're acting for (see current_chat)."""
     path.mkdir(parents=True, exist_ok=True)
     token = _current_sandbox.set(path)
+    chat_token = _current_chat.set(chat)
     try:
         yield path
     finally:
+        _current_chat.reset(chat_token)
         _current_sandbox.reset(token)
+
+
+def current_chat():
+    """The chat id the current tool call is for, or None (e.g. the web UI)."""
+    return _current_chat.get()
 
 
 def resolve_in(base: Path, path: str) -> Path:

@@ -72,12 +72,15 @@ def call_tool(fname: str, args_text: Any):
         return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
 
 
-def run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None) -> List[tuple]:
+def run_tool_calls(
+    messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None, chat=None,
+) -> List[tuple]:
     """Execute tool_calls via the plugin registry, appending the assistant and
     tool-result messages to `messages` in place. Blocking (plugins are plain
     sync functions, some doing network I/O) - callers run it in a thread.
     File plugins work in `sandbox` (the request's chat folder; the root
-    sandbox if None) - see plugins/file_ops.py.
+    sandbox if None) - see plugins/file_ops.py - for `chat` (the request's
+    chat id, if any).
 
     Returns (key, path) for each file the tools created for the user: a
     plugin marks one by including "attachment": <sandbox-relative path> in
@@ -86,7 +89,7 @@ def run_tool_calls(messages: List[Dict[str, Any]], tool_calls: List[Dict[str, An
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
     attachments = []
-    with file_ops.using_sandbox(sandbox or file_ops.SANDBOX_DIR):
+    with file_ops.using_sandbox(sandbox or file_ops.SANDBOX_DIR, chat=chat):
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
             fname = fn.get("name")

@@ -276,6 +276,7 @@ class ChatRequest:
     temperature: float
     max_tokens: int
     sandbox: Any  # the chat's own folder - its file tools, uploads and memory live there
+    chat: str = None  # the chat's id (the standard "user" field), if the client sent one
 
     def model_args(self, **extra) -> Dict[str, Any]:
         return {
@@ -322,7 +323,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
         messages=messages, tools=tools_, model=model_name, temperature=DEFAULT_TEMPERATURE if body.get("temperature") is None else body["temperature"],
         max_tokens=max_tokens,
         # Which chat this is for (the standard "user" field).
-        sandbox=files.file_ops.chat_sandbox(files.chat_id(body.get("user"))),
+        sandbox=files.file_ops.chat_sandbox(files.chat_id(body.get("user"))), chat=files.chat_id(body.get("user")),
     )
 
 
@@ -366,7 +367,7 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox))
+        tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox, req.chat))
         resp = await _call_model(**req.model_args())
         iterations += 1
 
@@ -454,7 +455,7 @@ async def _stream(req: ChatRequest):
                 }
                 for idx, slot in sorted(tool_call_accum.items())
             ]
-            tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox))
+            tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox, req.chat))
             iterations += 1
             continue
 

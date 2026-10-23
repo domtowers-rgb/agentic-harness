@@ -8,3 +8,5 @@ env/
 .pytest_cache/
 workspace/
 audit.log
+reminders.json
+reminders.json.tmp
