@@ -1,18 +1,14 @@
-from datetime import datetime, timezone as dt_timezone
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    ZoneInfo = None
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from agentic_harness import clock
 
 
-def get_current_time(timezone: str = "UTC"):
-    if not timezone or timezone.upper() == "UTC":
-        now = datetime.now(dt_timezone.utc)
-        return {"iso": now.isoformat(), "timezone": "UTC"}
-
-    if ZoneInfo is None:
-        return {"error": "timezone lookup is unavailable on this Python version"}
-
+def get_current_time(timezone: str = None):
+    """Local time (AGENTIC_TIMEZONE) by default - the same zone as today's
+    date in the system prompt and reminder times, so they all agree."""
+    if not timezone:
+        return {"iso": datetime.now(clock.local_tz()).isoformat(), "timezone": clock.zone_name()}
     try:
         now = datetime.now(ZoneInfo(timezone))
     except Exception as exc:
@@ -23,7 +19,7 @@ def get_current_time(timezone: str = "UTC"):
 def register(registry):
     registry.register("get_current_time", get_current_time, {
         "name": "get_current_time",
-        "description": "Get the current date and time (UTC unless a timezone is given).",
+        "description": "Get the current date and time - local time unless a timezone is given.",
         "parameters": {
             "type": "object",
             "properties": {

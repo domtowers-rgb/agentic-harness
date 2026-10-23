@@ -3,6 +3,7 @@ import json
 import pytest
 
 from agentic_harness import main as main_mod, model
+from agentic_harness import clock
 from agentic_harness import prompt as prompt_mod
 from agentic_harness import tools as tools_mod
 
@@ -947,7 +948,7 @@ class TestGrounding:
 
         monkeypatch.setattr(main_mod, "model_impl", Spy())
         monkeypatch.setattr(prompt_mod, "INCLUDE_GROUNDING", True)
-        monkeypatch.setattr(prompt_mod, "TIMEZONE", "Europe/London")
+        monkeypatch.setattr(clock, "TIMEZONE", "Europe/London")
         monkeypatch.setattr(prompt_mod, "PERSONALITY", "Be friendly.")
         body = {"messages": [{"role": "user", "content": "hi"}]}
         if enabled_plugins is not None:

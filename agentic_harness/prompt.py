@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List
 
-from . import model
+from . import clock, model
 
 PERSONALITY_FILE = os.environ.get("AGENTIC_PERSONALITY_FILE", "SOUL.md")
 PERSONALITY_MAX_TOKENS = 200
@@ -68,9 +68,6 @@ def content_chars(message: Dict[str, Any]) -> int:
     return len(json.dumps(content, default=str))
 
 
-# Time zone for "today's date" in the system prompt - this machine may well
-# run on UTC while its users don't.
-TIMEZONE = os.environ.get("AGENTIC_TIMEZONE", "")
 # Set to 0 to leave the date (and the "check before guessing" line) out.
 INCLUDE_GROUNDING = os.environ.get("AGENTIC_INCLUDE_DATE", "1") != "0"
 
@@ -81,12 +78,8 @@ def today() -> str:
     there makes a local server reprocess the whole prompt instead of
     reusing its cache - a date changes once a day, a clock every minute.
     The model has get_current_time for the exact time."""
-    from zoneinfo import ZoneInfo
-    try:
-        now = datetime.now(ZoneInfo(TIMEZONE)) if TIMEZONE else datetime.now().astimezone()
-    except Exception:
-        now = datetime.now().astimezone()
-    return f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')} ({TIMEZONE or now.tzname()})"
+    now = datetime.now(clock.local_tz())
+    return f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')} ({clock.zone_name()})"
 
 
 def grounding(tool_names) -> str:

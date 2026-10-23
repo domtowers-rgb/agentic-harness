@@ -6,6 +6,7 @@ import pytest
 
 import plugins.file_ops as file_ops
 import plugins.reminders as reminders
+from agentic_harness import clock
 from agentic_harness import main as main_mod
 
 NOW = datetime(2026, 10, 22, 14, 0, tzinfo=timezone.utc)
@@ -15,7 +16,7 @@ NOW = datetime(2026, 10, 22, 14, 0, tzinfo=timezone.utc)
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(file_ops, "SANDBOX_DIR", tmp_path / "workspace")
     monkeypatch.setattr(reminders, "REMINDERS_FILE", str(tmp_path / "reminders.json"))
-    monkeypatch.setattr(reminders, "TIMEZONE", "Europe/London")
+    monkeypatch.setattr(clock, "TIMEZONE", "Europe/London")
     return tmp_path / "reminders.json"
 
 
@@ -85,6 +86,19 @@ class TestDelivery:
         assert client.post(f"/v1/reminders/{due[0]['id']}/sent").json() == {"removed": due[0]["id"]}
         assert client.post(f"/v1/reminders/{due[0]['id']}/sent").status_code == 404
         assert [r["text"] for r in _as("signal:+1", action="list")["reminders"]] == ["later"]
+
+    def test_offered_only_to_requests_for_a_chat(self, client, monkeypatch):
+        offered = []
+
+        class Spy:
+            def chat(self, messages, tools=None, **kwargs):
+                offered.append({t["function"]["name"] for t in tools})
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Spy())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        client.post("/v1/chat/completions", json={"user": "signal:+1", "messages": [{"role": "user", "content": "hi"}]})
+        assert "reminder" not in offered[0] and "reminder" in offered[1]
 
     def test_the_tool_knows_which_chat_the_request_is_for(self, client, monkeypatch):
         """A real request: the "user" field reaches the tool as its chat."""

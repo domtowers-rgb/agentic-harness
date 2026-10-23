@@ -20,23 +20,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import plugins.file_ops as file_ops
+from agentic_harness.clock import local_tz as _tz
 
 # Outside the sandbox on purpose: the file tools can't read or edit it.
 REMINDERS_FILE = os.environ.get("AGENTIC_REMINDERS_FILE", "reminders.json")
 MAX_PER_CHAT = 20
 MAX_TEXT_CHARS = 500
-# Same time zone as "today's date" in the system prompt.
-TIMEZONE = os.environ.get("AGENTIC_TIMEZONE", "")
 
 _lock = threading.Lock()  # tools run in worker threads; the endpoints don't
-
-
-def _tz():
-    from zoneinfo import ZoneInfo
-    try:
-        return ZoneInfo(TIMEZONE) if TIMEZONE else datetime.now().astimezone().tzinfo
-    except Exception:
-        return datetime.now().astimezone().tzinfo
 
 
 def _load() -> list:
@@ -51,11 +42,7 @@ def _load() -> list:
 
 
 def _save(reminders: list) -> None:
-    tmp_path = f"{REMINDERS_FILE}.tmp"
-    # Readable by this account only: they're people's plans.
-    with os.fdopen(os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
-        json.dump(reminders, f, indent=1)
-    os.replace(tmp_path, REMINDERS_FILE)
+    file_ops.write_json(REMINDERS_FILE, reminders)
 
 
 _RELATIVE = re.compile(r"^in\s+(\d+)\s*(minute|min|hour|hr|day|week)s?$", re.I)
@@ -152,7 +139,7 @@ def register(registry):
             },
             "required": ["action"],
         },
-    })
+    }, needs_chat=True)
 
 
 def register_routes(app):

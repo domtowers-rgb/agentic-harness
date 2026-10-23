@@ -48,7 +48,7 @@ systemctl --user enable --now agentic-harness
 sudo loginctl enable-linger $USER
 ```
 
-The last line lets it start at boot without you logging in (once is enough). Then `systemctl --user status agentic-harness` shows whether it's running, `journalctl --user -u agentic-harness -f` follows its log, and `systemctl --user restart agentic-harness` picks up code or `.env` changes.
+The last line lets it start at boot without you logging in (once is enough). Then `systemctl --user status agentic-harness` shows whether it's running, `journalctl --user -u agentic-harness -f` follows its log, and `systemctl --user restart agentic-harness` picks up changes to the code, `.env` or `SOUL.md` (all read once, at startup).
 
 Configuration
 
@@ -72,7 +72,7 @@ cp .env.example .env    # then edit .env
 - `AGENTIC_DEFAULT_TEMPERATURE`: `temperature` used when a request omits it - the web UI and agentic-gateway both do (default `0.7`). Lower is more predictable but flatter: at `0` a model gives the same stock phrasing every time.
 - `AGENTIC_HISTORY_MAX_TOKENS`: how much conversation history to keep (capped automatically by the context the model is actually loaded with, where LM Studio says - leaving room for the tool definitions, system prompt and reply) (an image in a message counts as about 250 tokens, not its data size), in the same rough chars/4 heuristic `truncate_messages` (agentic_harness/prompt.py) uses (default `2048`). Tune this to roughly match your local model's actual configured context window. Oldest messages are dropped first, but the newest message is always kept even if it's over budget on its own (a long paste is sent rather than silently dropped), as is a leading system message.
 - `AGENTIC_RELOAD`: set to `1` to auto-restart on code changes (uvicorn's `--reload`). Off by default - on at least one real Windows setup, that reload path respawned a worker using the base interpreter instead of an active venv, silently losing venv-installed dependencies (a plugin's own dependency would just vanish - watch the `[plugins] failed to load` startup log if you enable this).
-- `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is put first, as the system message, on every request; if the request has its own system message (agentic-gateway uses one to explain who's in a group chat), the two are combined - personality first - since many local chat templates accept only one system message. Kept intentionally small (guideline: ~200 tokens, estimated via the same rough chars/4 heuristic used elsewhere in this file); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
+- `AGENTIC_PERSONALITY_FILE`: path to a small system-prompt file (default `SOUL.md`). Its content is put first, as the system message, on every request; if the request has its own system message (agentic-gateway uses one to explain who's in a group chat), the two are combined - personality first - since many local chat templates accept only one system message. Kept intentionally small (guideline: ~200 tokens, estimated at ~4 characters per token); going over just prints a startup warning rather than failing, since it's a guideline, not a hard limit. Edit `SOUL.md` directly, or point this at a different file. Empty or missing file means no personality prompt is added at all.
 - `AGENTIC_TTS_VOICE` / `AGENTIC_TTS_DIR` / `AGENTIC_TTS_MAX_CHARS`: the spoken-reply voice, where voices are kept, and the most text spoken per reply (see "Voice messages").
 - `AGENTIC_PODCAST_VOICES` / `AGENTIC_PODCAST_HOSTS`: the two podcast hosts' Piper voices and names (defaults `en_GB-alba-medium,en_GB-alan-medium` and `Alba,Alan`).
 - `AGENTIC_COUNCIL_MODELS`: fixed council members, comma-separated model ids (default: every chat model currently loaded).
@@ -123,7 +123,7 @@ By default, every loaded plugin is automatically added to the `tools` sent on ea
 Built-in plugins:
 
 - `calculate` - safe arithmetic (AST-based, no `eval`).
-- `get_current_time` - current date/time, optionally in an IANA timezone.
+- `get_current_time` - current date/time: local (`AGENTIC_TIMEZONE`, the same zone as the date in the system prompt and reminder times) unless the model asks for another IANA timezone.
 - `fetch_url` - fetch a public http(s) URL as readable text: HTML pages are converted to plain text (scripts, styles, menus, footers, cookie banners and hidden elements dropped; if the page marks its main content with `<main>`, only that is kept) and returned with the page title, typically a small fraction of the raw HTML's size. JSON and plain text pass through as-is; binary content (PDFs, images) is refused. Capped at `AGENTIC_FETCH_MAX_CHARS`. Refuses private/loopback/link-local addresses and does not follow redirects (basic SSRF protection). A failed DNS lookup is reported as such (with one retry for a temporary resolver failure), not as a private address.
 - `web_search` - web search via Brave Search. Requires `BRAVE_API_KEY` (a free key from https://brave.com/search/api/ covers about 2,000 searches a month); without it, every call returns a "not configured" error - check `audit.log` if searches never seem to find anything. Result titles and snippets are flattened to plain text.
 - `read_file` / `write_file` / `list_files` - sandboxed to one directory (`AGENTIC_FILES_DIR`, default `workspace/`). Cannot read or write anything outside it.
@@ -132,7 +132,7 @@ Built-in plugins:
 - `reminder` (optional plugin, `plugins/reminders.py`) - set, list or cancel reminders for the current chat: "remind me to book the Thai place on Friday at 10" is stored against the chat's id (the request's `user` field) with a time in `AGENTIC_TIMEZONE` (`2026-11-13 10:00`, a date alone meaning 9am, or `in 2 hours`). A client delivers due ones: `GET /v1/reminders/due` lists them, and `POST /v1/reminders/{id}/sent` removes one once it's been sent - so a client that's down delivers late rather than never. agentic-gateway does this, sending each to its chat. Stored in `reminders.json` (`AGENTIC_REMINDERS_FILE`; owner-only, outside the sandbox so the file tools can't touch it), at most 20 per chat. Not offered to requests without a chat id (the web UI), which nothing could deliver to.
 - `ask_council` (optional plugin, `plugins/council.py`) - for a message starting `/council` (or asking for the council): the question goes, at the same time, to every chat model currently loaded on the backend (or `AGENTIC_COUNCIL_MODELS`), and their answers come back for the chat's own model to judge - naming each position and giving a verdict. With LM Studio's LM Link the members can be on different machines. Needs at least two models loaded.
 - `read_document` - reads the text of a PDF, Word (.docx), PowerPoint (.pptx) or plain-text file in the same directory, including files the user has sent. Long documents come back `AGENTIC_READ_MAX_CHARS` (default `8000`) at a time; the result's `next_start` says where to continue. Scanned PDFs (images of text) have no extractable text.
-- `remember` / `recall` / `forget` - a small persistent key-value notes store (in `memory.json` in the same sandboxed directory), so the model can save and retrieve small facts across separate conversations, not just within one.
+- `memory` - a small persistent key-value notes store (in `memory.json` in the chat's own sandbox): the model can `save`, `get` (one, or all) and `delete` small facts across separate conversations, not just within one. One tool rather than three, to keep the prompt small. Saved safely: an unreadable file is moved aside, never overwritten.
 - `run_command` - runs a shell command (not through a shell interpreter) with its cwd set to the sandbox directory, with a timeout. **Off by default** - an absolute-path command isn't contained by the sandbox cwd, so this grants real system access. Set `AGENTIC_ENABLE_SHELL=1` to opt in.
 
 Additional environment variables used by the built-in plugins:
@@ -146,7 +146,7 @@ Additional environment variables used by the built-in plugins:
 
 Voice messages (optional plugin)
 
-`plugins/voice.py` adds two endpoints - it's the one plugin that adds HTTP endpoints (via a `register_routes(app)` hook) rather than model tools. It's optional: its libraries aren't in `requirements.txt`. To enable it:
+`plugins/voice.py` adds two endpoints (via a `register_routes(app)` hook) rather than model tools. It's optional: its libraries aren't in `requirements.txt`. To enable it:
 
 ```bash
 pip install -r requirements-voice.txt
@@ -165,7 +165,7 @@ The server listens on 127.0.0.1 only, but your web browser runs on the same mach
 
 Separate chats
 
-A request can say which chat it's for with the standard `user` field (agentic-gateway sends one per Signal chat, e.g. `signal:group:<id>`). Each chat then gets its own folder inside the sandbox - `chats/<hash of its id>/`, so folder names don't contain phone numbers - and every file tool works only in there: its uploads, the documents made for it, and its `remember`/`recall` memory. One chat can't read another's files or memories, even with `read_file` and a `../` path. Requests without `user` (the web UI - the machine's owner) work in the sandbox root, which contains `chats/`, so the owner can still see everything.
+A request can say which chat it's for with the standard `user` field (agentic-gateway sends one per Signal chat, e.g. `signal:group:<id>`). Each chat then gets its own folder inside the sandbox - `chats/<hash of its id>/`, so folder names don't contain phone numbers - and every file tool works only in there: its uploads, the documents made for it, and its `memory` notes. One chat can't read another's files or memories, even with `read_file` and a `../` path. Requests without `user` (the web UI - the machine's owner) work in the sandbox root, which contains `chats/`, so the owner can still see everything.
 
 Files in and out
 

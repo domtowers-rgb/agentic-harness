@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import re
 from contextlib import contextmanager
@@ -69,6 +70,16 @@ def using_sandbox(path: Path, chat: str = None):
     finally:
         _current_chat.reset(chat_token)
         _current_sandbox.reset(token)
+
+
+def write_json(path, data) -> None:
+    """Save JSON safely: write-then-rename, so a crash mid-write can't leave
+    a truncated file (which would then read as empty - losing everything in
+    it); readable by this account only."""
+    tmp_path = f"{path}.tmp"
+    with os.fdopen(os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp_path, path)
 
 
 def current_chat():

@@ -31,11 +31,13 @@ class TestCalculator:
 
 
 class TestCurrentTime:
-    def test_defaults_to_utc(self):
+    def test_defaults_to_local_time(self, monkeypatch):
+        from agentic_harness import clock
         from plugins.current_time import get_current_time
+        monkeypatch.setattr(clock, "TIMEZONE", "Europe/London")
         result = get_current_time()
-        assert result["timezone"] == "UTC"
-        assert "T" in result["iso"]
+        assert result["timezone"] == "Europe/London"
+        assert result["iso"].endswith(("+00:00", "+01:00"))
 
     def test_named_timezone(self):
         from plugins.current_time import get_current_time
@@ -220,6 +222,26 @@ class TestMemory:
         assert self.memory.remember(key="a", value="1-updated")["status"] == "saved"
         # a genuinely new key when full is rejected
         assert "error" in self.memory.remember(key="c", value="3")
+
+    def test_one_memory_tool_saves_gets_and_deletes(self):
+        assert self.memory.memory("save", key="pet", value="cat") == {"status": "saved", "key": "pet"}
+        assert self.memory.memory("get", key="pet") == {"key": "pet", "value": "cat"}
+        assert self.memory.memory("get") == {"memories": {"pet": "cat"}}
+        assert self.memory.memory("delete", key="pet") == {"status": "forgotten", "key": "pet"}
+        assert "action must be" in self.memory.memory("forget")["error"]
+
+    def test_an_unreadable_file_is_kept_aside_not_overwritten(self, tmp_path, capsys):
+        (tmp_path / "memory.json").write_text('{"half a file', encoding="utf-8")
+        self.memory.remember(key="new", value="1")
+        assert [p.name.split("-")[0] for p in tmp_path.glob("memory.json.unreadable-*")] == ["memory.json.unreadable"]
+        assert '{"half a file' in next(tmp_path.glob("memory.json.unreadable-*")).read_text()
+        assert self.memory.recall() == {"memories": {"new": "1"}}
+        assert "moved aside" in capsys.readouterr().out
+
+    def test_saved_safely_and_owner_only(self, tmp_path):
+        self.memory.remember(key="k", value="v")
+        assert (tmp_path / "memory.json").stat().st_mode & 0o777 == 0o600
+        assert not (tmp_path / "memory.json.tmp").exists()
 
     def test_persists_to_a_real_json_file(self, tmp_path):
         self.memory.remember(key="k", value="v")

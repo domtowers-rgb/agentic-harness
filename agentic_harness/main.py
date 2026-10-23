@@ -2,8 +2,26 @@
 # reads them. Only when started as the service - never when imported by
 # the tests, which must not pick up someone's real .env.
 if __name__ == "__main__":
+    import os
+    import sys
+
+    import uvicorn
+
     from agentic_harness.config import load_env_file
     load_env_file()
+    # Off by default: uvicorn's --reload respawns a worker subprocess, and on
+    # at least one real Windows setup that respawn silently used the base
+    # interpreter instead of an active venv's - meaning any venv-installed
+    # dependency (a plugin's, say) would just vanish with no error. Opt in
+    # with AGENTIC_RELOAD=1 for active development, and watch for that
+    # failure mode if you do (plugins.py logs a load failure if it happens).
+    reload = os.environ.get("AGENTIC_RELOAD") == "1"
+    # Served by its import name, and nothing below run here: as __main__
+    # this file would otherwise build a second, unused copy of everything -
+    # every plugin loaded twice - and a plugin importing agentic_harness.main
+    # (the council) would see that copy's model backend, not the live one.
+    uvicorn.run("agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=reload)
+    sys.exit(0)
 
 import asyncio
 import json
@@ -15,7 +33,6 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterator, List
 from urllib.parse import urlparse
 
-import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -300,6 +317,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
     # to that subset of plugin names (used by the web UI's plugin toggles);
     # omitting it means "all loaded plugins".
     enabled_plugins = body.get("enabled_plugins")
+    chat = files.chat_id(body.get("user"))
     existing_names = {t.get("function", {}).get("name") for t in tools_}
     for tool in _PLUGIN_TOOLS:
         name = tool["function"]["name"]
@@ -307,6 +325,8 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
             continue
         if enabled_plugins is not None and name not in enabled_plugins:
             continue
+        if not chat and plugins.registry.needs_chat(name):
+            continue  # e.g. reminders: nothing could deliver them
         tools_.append(tool)
 
     # Trim history to fit: AGENTIC_HISTORY_MAX_TOKENS, but never more than
@@ -323,7 +343,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
         messages=messages, tools=tools_, model=model_name, temperature=DEFAULT_TEMPERATURE if body.get("temperature") is None else body["temperature"],
         max_tokens=max_tokens,
         # Which chat this is for (the standard "user" field).
-        sandbox=files.file_ops.chat_sandbox(files.chat_id(body.get("user"))), chat=files.chat_id(body.get("user")),
+        sandbox=files.file_ops.chat_sandbox(chat), chat=chat,
     )
 
 
@@ -488,14 +508,3 @@ async def _stream(req: ChatRequest):
 # Serve the static chat UI. Mounted after the API routes above so they take
 # priority over the catch-all static handler for the same path space.
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
-
-
-if __name__ == "__main__":
-    # Off by default: uvicorn's --reload respawns a worker subprocess, and on
-    # at least one real Windows setup that respawn silently used the base
-    # interpreter instead of an active venv's - meaning any venv-installed
-    # dependency (a plugin's, say) would just vanish with no error. Opt in
-    # with AGENTIC_RELOAD=1 for active development, and watch for that
-    # failure mode if you do (plugins.py logs a load failure if it happens).
-    reload = os.environ.get("AGENTIC_RELOAD") == "1"
-    uvicorn.run("agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=reload)

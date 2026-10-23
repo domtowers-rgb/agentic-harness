@@ -12,8 +12,8 @@ requirements.txt. Without them installed this plugin is skipped at
 startup (logged as "[plugins] failed to load 'plugins.voice'"), the two
 endpoints don't exist, and everything else works as before.
 
-Unlike the other plugins it adds HTTP endpoints rather than model tools,
-via the loader's register_routes(app) hook.
+It adds HTTP endpoints rather than model tools, via the loader's
+register_routes(app) hook.
 """
 import asyncio
 import importlib.util
@@ -38,7 +38,7 @@ WHISPER_MODEL = os.environ.get("AGENTIC_WHISPER_MODEL", "small")
 SAMPLE_RATE = 16000  # what Whisper expects
 # Text-to-speech: any Piper voice name; downloaded on first use (~60 MB).
 TTS_VOICE = os.environ.get("AGENTIC_TTS_VOICE", "en_GB-cori-medium")
-TTS_DIR = Path(os.environ.get("AGENTIC_TTS_DIR") or Path.home() / ".cache" / "piper-voices")
+TTS_DIR = Path(os.environ.get("AGENTIC_TTS_DIR") or Path.home() / ".cache" / "piper-voices").expanduser()
 # Longer replies are cut short in speech (the full text is still sent
 # alongside), at a sentence end where possible.
 MAX_SPOKEN_CHARS = int(os.environ.get("AGENTIC_TTS_MAX_CHARS", "1500"))

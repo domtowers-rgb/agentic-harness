@@ -327,11 +327,12 @@ class TestPerChatSandboxes:
         assert "error" in self._tool_result_for(client, monkeypatch, "signal:group:B", "read_file", {"path": "../" + file_ops.chat_sandbox("signal:group:A").name + "/uploads/secret.txt"})
 
     def test_memory_is_separate_per_chat(self, client, monkeypatch):
-        self._tool_result_for(client, monkeypatch, "signal:+1555", "remember", {"key": "colour", "value": "blue"})
-        assert self._tool_result_for(client, monkeypatch, "signal:+1555", "recall", {"key": "colour"})["value"] == "blue"
-        other = self._tool_result_for(client, monkeypatch, "signal:+1666", "recall", {"key": "colour"})
+        self._tool_result_for(client, monkeypatch, "signal:+1555", "memory", {"action": "save", "key": "colour", "value": "blue"})
+        get = {"action": "get", "key": "colour"}
+        assert self._tool_result_for(client, monkeypatch, "signal:+1555", "memory", get)["value"] == "blue"
+        other = self._tool_result_for(client, monkeypatch, "signal:+1666", "memory", get)
         assert other.get("value") != "blue"
-        web_ui = self._tool_result_for(client, monkeypatch, None, "recall", {"key": "colour"})
+        web_ui = self._tool_result_for(client, monkeypatch, None, "memory", get)
         assert web_ui.get("value") != "blue"
 
     def test_created_file_is_in_the_chat_folder_and_downloadable(self, client, monkeypatch):
