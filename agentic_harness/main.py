@@ -69,6 +69,17 @@ async def reject_cross_site_requests(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def revalidate_web_ui(request: Request, call_next):
+    """The web UI's files are always checked for a newer version (cheaply -
+    an unchanged file is just a 304). Without this, a browser could keep
+    using an old cached page with a newer script after an update."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/v1/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 # Added last so it runs first.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 

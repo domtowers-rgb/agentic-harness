@@ -1132,3 +1132,10 @@ class TestLeakedWorking:
     def test_streamed_clean_replies_are_left_alone(self, client, monkeypatch):
         events, _ = self._stream(client, monkeypatch, "Edinburgh.")
         assert not any("replace_content" in e for e in events)
+
+
+def test_web_ui_files_are_always_revalidated(client):
+    for path in ("/", "/app.js", "/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/v1/status").headers
