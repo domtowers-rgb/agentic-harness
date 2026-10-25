@@ -2,60 +2,94 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agentic LLM Harness</title>
-<link rel="stylesheet" href="style.css?v=2">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agentic Harness</title>
+<link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
-  <aside id="sidebar">
-    <div class="sidebar-head">
-      <span class="brand">Agentic Harness</span>
-      <button id="sidebarClose" class="icon-btn mobile-only" title="Close sidebar" aria-label="Close sidebar">✕</button>
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-top">
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>Agentic Harness</span>
+      <button id="sidebarClose" class="icon-btn" data-icon="panel" title="Close sidebar" aria-label="Close sidebar"></button>
     </div>
-    <button id="newChat" class="new-chat-btn"><span aria-hidden="true">+</span> New chat</button>
-    <nav id="conversationList" class="conversation-list" aria-label="Conversations"></nav>
-    <button id="settingsBtn" class="sidebar-footer-btn"><span aria-hidden="true">⚙</span> Settings</button>
+    <button id="newChat" class="side-action"><span data-icon="newchat"></span>New chat</button>
+    <label class="search">
+      <span data-icon="search"></span>
+      <input id="search" type="search" placeholder="Search chats" aria-label="Search chats">
+    </label>
+    <nav id="conversationList" class="conversation-list" aria-label="Chats"></nav>
+    <button id="settingsBtn" class="side-action subtle"><span data-icon="settings"></span>Settings</button>
   </aside>
-  <div id="scrim" class="scrim hidden"></div>
+  <div id="scrim" class="scrim"></div>
 
-  <div id="settingsOverlay" class="overlay hidden">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-      <div class="modal-header">
-        <h2 id="settingsTitle">Settings</h2>
-        <button id="settingsClose" class="icon-btn" title="Close" aria-label="Close">✕</button>
+  <div class="main">
+    <header class="topbar">
+      <button id="sidebarOpen" class="icon-btn" data-icon="panel" title="Open sidebar" aria-label="Open sidebar"></button>
+      <button id="newChatTop" class="icon-btn" data-icon="newchat" title="New chat" aria-label="New chat"></button>
+      <span id="chatTitle" class="chat-title"></span>
+    </header>
+
+    <main id="log" class="log" aria-live="polite"></main>
+
+    <div id="composerDock" class="composer-dock">
+      <div id="welcome" class="welcome">
+        <h1 id="greeting">Hello</h1>
       </div>
-      <section class="modal-section">
-        <label class="field-label" for="endpoint">Model server</label>
-        <div class="field-row">
-          <input id="endpoint" type="text" placeholder="http://127.0.0.1:1234/v1">
-          <button id="connect">Connect</button>
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+        <textarea id="input" rows="1" placeholder="How can I help?" aria-label="Message"></textarea>
+        <div class="composer-bar">
+          <button type="button" id="attachBtn" class="icon-btn" data-icon="paperclip" title="Attach files or photos" aria-label="Attach files or photos"></button>
+          <input id="fileInput" type="file" multiple hidden>
+          <button type="button" id="thinkBtn" class="pill-toggle" aria-pressed="true" title="Let the model think before answering (slower, more careful)"><span data-icon="bulb"></span>Think</button>
+          <span class="spacer"></span>
+          <label class="model-picker" title="Model">
+            <select id="model" aria-label="Model"><option value="">Default model</option></select>
+            <span data-icon="chevron"></span>
+          </label>
+          <button type="submit" id="send" class="send-btn" title="Send" aria-label="Send" data-icon="send" disabled></button>
         </div>
-        <span id="connStatus" class="status"></span>
+      </form>
+      <div id="suggestions" class="suggestions"></div>
+    </div>
+  </div>
+
+  <div id="dropzone" class="dropzone" aria-hidden="true"><div>Drop files to attach</div></div>
+
+  <div id="settings" class="overlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="dialog-head">
+        <h2 id="settingsTitle">Settings</h2>
+        <button id="settingsClose" class="icon-btn" data-icon="close" title="Close" aria-label="Close"></button>
+      </div>
+      <section>
+        <h3>Appearance</h3>
+        <div class="segmented" id="themePicker" role="radiogroup" aria-label="Theme">
+          <button type="button" data-theme-choice="system" role="radio">System</button>
+          <button type="button" data-theme-choice="light" role="radio">Light</button>
+          <button type="button" data-theme-choice="dark" role="radio">Dark</button>
+        </div>
+        <label class="setting-row">
+          <span><strong>Show generation speed</strong><small>A tag on each reply with how fast it was written, in tokens per second.</small></span>
+          <span class="switch"><input type="checkbox" id="showSpeed"><span class="track"></span></span>
+        </label>
       </section>
-      <section class="modal-section">
-        <div class="field-label">Tools</div>
+      <section>
+        <h3>Model server</h3>
+        <div class="field-row">
+          <input id="endpoint" type="text" placeholder="http://127.0.0.1:8080/v1" aria-label="Model server address">
+          <button type="button" id="connect" class="primary-btn">Connect</button>
+        </div>
+        <p id="connStatus" class="status"></p>
+      </section>
+      <section>
+        <h3>Tools</h3>
         <div id="pluginList" class="plugin-list"></div>
-        <div class="hint">Changes apply to new chats.</div>
+        <p class="hint">Changes apply to new chats.</p>
       </section>
     </div>
   </div>
 
-  <div class="main-panel">
-    <header class="topbar">
-      <button id="sidebarToggle" class="icon-btn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
-      <select id="model" class="model-select" title="Model for new messages">
-        <option value="">Default model</option>
-      </select>
-      <span id="connDot" class="conn-dot" title="Checking connection…"></span>
-    </header>
-    <main id="log" aria-live="polite"></main>
-    <footer>
-      <div class="composer">
-        <textarea id="input" rows="1" placeholder="Message…" title="Enter to send, Shift+Enter for a new line"></textarea>
-        <button id="send" class="send-btn" title="Send" aria-label="Send">↑</button>
-      </div>
-    </footer>
-  </div>
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

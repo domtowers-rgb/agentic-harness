@@ -1,0 +1,6 @@
+# Packages for code run by the run_python plugin, installed into its own
+# environment (sandbox-venv/), separate from the harness's. See the README.
+pandas
+numpy
+matplotlib
+openpyxl

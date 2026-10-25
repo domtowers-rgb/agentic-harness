@@ -61,7 +61,7 @@ def ask_council(question: str):
     if len(members) < 2:
         return {"error": (
             f"The council needs at least two chat models loaded, and only {len(members)} is"
-            f"{': ' + members[0] if members else ''}. Load another in LM Studio (e.g. on another linked machine), "
+            f"{': ' + members[0] if members else ''}. Load another on the model server (e.g. LM Studio on another linked machine; a llama.cpp server runs just one), "
             "or set AGENTIC_COUNCIL_MODELS."
         )}
     with ThreadPoolExecutor(max_workers=len(members)) as pool:

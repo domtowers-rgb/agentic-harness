@@ -29,7 +29,7 @@ def test_load_plugins_logs_and_continues_on_failure(capsys, monkeypatch):
     assert "totally_broken_plugin" in captured.out
     assert "No module named 'pptx'" in captured.out
     # real plugins still loaded fine despite the injected failure
-    assert plugins_mod.registry.get("calculate") is not None
+    assert plugins_mod.registry.get("get_current_time") is not None
 
 
 def test_plugins_can_add_endpoints(tmp_path, monkeypatch):

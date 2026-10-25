@@ -212,7 +212,8 @@ _load_lock = asyncio.Lock()
 async def load_model(request: Request):
     """{"model": id} -> make it the only chat model loaded on the backend:
     every other loaded chat model is ejected first, then it's loaded (if it
-    wasn't already). LM Studio only (501 otherwise). Can take a minute or
+    wasn't already). LM Studio only (501 otherwise - a llama.cpp server
+    runs the one model it was started with). Can take a minute or
     more for a big model. Note this affects everything using the backend,
     not just the caller. Returns {"model", "unloaded", "already_loaded",
     "load_time_seconds"}."""
@@ -221,7 +222,7 @@ async def load_model(request: Request):
     if not isinstance(model_id, str) or not model_id.strip():
         raise HTTPException(status_code=400, detail="model is required")
     if not hasattr(model_impl, "load_exclusive"):
-        raise HTTPException(status_code=501, detail="loading models is only supported with LM Studio")
+        raise HTTPException(status_code=501, detail="this model server can't load models on request")
     async with _load_lock:
         try:
             result = await asyncio.to_thread(model_impl.load_exclusive, model_id.strip())
@@ -305,12 +306,16 @@ class ChatRequest:
     max_tokens: int
     sandbox: Any  # the chat's own folder - its file tools, uploads and memory live there
     chat: str = None  # the chat's id (the standard "user" field), if the client sent one
+    thinking: bool = None  # True/False switches a thinking model's thinking on/off; None = its default
 
     def model_args(self, **extra) -> Dict[str, Any]:
-        return {
+        args = {
             "messages": self.messages, "tools": self.tools, "model": self.model,
             "temperature": self.temperature, "max_tokens": self.max_tokens, **extra,
         }
+        if self.thinking is not None:
+            args["thinking"] = self.thinking
+        return args
 
 
 async def _prepare(body: Dict[str, Any]) -> ChatRequest:
@@ -329,6 +334,9 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
     # omitting it means "all loaded plugins".
     enabled_plugins = body.get("enabled_plugins")
     chat = files.chat_id(body.get("user"))
+    # Set by agentic-gateway for GATEWAY_OWNERS' messages, and by the web UI
+    # (on this machine) for all of its own.
+    owner = body.get("owner") is True
     existing_names = {t.get("function", {}).get("name") for t in tools_}
     for tool in _PLUGIN_TOOLS:
         name = tool["function"]["name"]
@@ -338,6 +346,8 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
             continue
         if not chat and plugins.registry.needs_chat(name):
             continue  # e.g. reminders: nothing could deliver them
+        if not owner and plugins.registry.owner_only(name):
+            continue  # e.g. run_python
         tools_.append(tool)
 
     # Trim history to fit: AGENTIC_HISTORY_MAX_TOKENS, but never more than
@@ -355,6 +365,9 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
         max_tokens=max_tokens,
         # Which chat this is for (the standard "user" field).
         sandbox=files.file_ops.chat_sandbox(chat), chat=chat,
+        # "thinking": false asks a thinking model to answer straight away -
+        # much quicker for everyday chat (see OpenAIModel._params).
+        thinking=body["thinking"] if isinstance(body.get("thinking"), bool) else None,
     )
 
 

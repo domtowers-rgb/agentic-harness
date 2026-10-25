@@ -5,31 +5,6 @@ import sys
 import pytest
 
 
-class TestCalculator:
-    def test_basic_arithmetic(self):
-        from plugins.calculator import calculate
-        assert calculate("2 * (3 + 4)") == {"result": 14}
-
-    def test_functions_and_constants(self):
-        from plugins.calculator import calculate
-        assert calculate("sqrt(16)") == {"result": 4.0}
-
-    def test_rejects_code_injection(self):
-        from plugins.calculator import calculate
-        result = calculate('__import__("os").system("echo pwned")')
-        assert "error" in result
-
-    def test_rejects_attribute_access(self):
-        from plugins.calculator import calculate
-        result = calculate("(1).__class__")
-        assert "error" in result
-
-    def test_rejects_garbage_input(self):
-        from plugins.calculator import calculate
-        result = calculate("not a valid expression $$$")
-        assert "error" in result
-
-
 class TestCurrentTime:
     def test_defaults_to_local_time(self, monkeypatch):
         from agentic_harness import clock
@@ -420,52 +395,6 @@ class TestWebSearch:
         result = web_search("test query")
         assert "error" in result
         assert "BRAVE_API_KEY" in result["error"]
-
-
-class TestShellExec:
-    def _reload(self, monkeypatch, enabled, files_dir):
-        if enabled:
-            monkeypatch.setenv("AGENTIC_ENABLE_SHELL", "1")
-        else:
-            monkeypatch.delenv("AGENTIC_ENABLE_SHELL", raising=False)
-        monkeypatch.setenv("AGENTIC_FILES_DIR", str(files_dir))
-        import plugins.shell_exec as shell_exec
-        return importlib.reload(shell_exec)
-
-    def test_disabled_by_default(self, monkeypatch, tmp_path):
-        module = self._reload(monkeypatch, enabled=False, files_dir=tmp_path)
-        registered = {}
-
-        class FakeRegistry:
-            def register(self, name, func, spec):
-                registered[name] = func
-
-        module.register(FakeRegistry())
-        assert registered == {}
-
-    def test_enabled_via_env_var(self, monkeypatch, tmp_path):
-        module = self._reload(monkeypatch, enabled=True, files_dir=tmp_path)
-        registered = {}
-
-        class FakeRegistry:
-            def register(self, name, func, spec):
-                registered[name] = func
-
-        module.register(FakeRegistry())
-        assert "run_command" in registered
-        result = registered["run_command"]("echo hi")
-        assert result["exit_code"] == 0
-        assert "hi" in result["stdout"]
-
-    def test_empty_command_rejected(self, monkeypatch, tmp_path):
-        module = self._reload(monkeypatch, enabled=True, files_dir=tmp_path)
-        result = module.run_command("   ")
-        assert "error" in result
-
-    def test_unknown_command_reports_error(self, monkeypatch, tmp_path):
-        module = self._reload(monkeypatch, enabled=True, files_dir=tmp_path)
-        result = module.run_command("this-command-should-not-exist-xyz")
-        assert "error" in result
 
 
 class TestWebSearchResults:

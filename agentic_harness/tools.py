@@ -84,7 +84,8 @@ def run_tool_calls(
 
     Returns (key, path) for each file the tools created for the user: a
     plugin marks one by including "attachment": <sandbox-relative path> in
-    its result (the document plugins do). Callers collect these with
+    its result (the document plugins do), or several with "attachments":
+    [paths] (run_python does). Callers collect these with
     collect_attachments and pass them on - see files.describe_attachments."""
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
@@ -106,6 +107,10 @@ def run_tool_calls(
                 title = args.get("title") if isinstance(args, dict) else None
                 key = (fname, title, args.get("format")) if title else (fname, path)
                 attachments.append((key, path))
+            if isinstance(result, dict) and isinstance(result.get("attachments"), list):
+                # Several files at once (run_python's): keyed by path, so a
+                # file rewritten by a later run is sent once, as it ends up.
+                attachments += [((fname, p), p) for p in result["attachments"] if isinstance(p, str)]
     return attachments
 
 

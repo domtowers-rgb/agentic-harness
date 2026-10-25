@@ -12,7 +12,7 @@ DEFAULT_MODEL = os.environ.get("AGENTIC_DEFAULT_MODEL", "gpt-4o-mini")
 
 
 class LoadUnavailable(Exception):
-    """The backend can't load/eject models on request (it isn't LM Studio)."""
+    """The backend can't load/eject models on request (only LM Studio can)."""
 
 
 def _lmstudio_post(url: str, body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
@@ -57,32 +57,30 @@ class OpenAIModel(BaseModel):
         self._client = OpenAI(api_key=resolved_key, base_url=resolved_base_url)
         self.base_url = resolved_base_url
 
-    def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None, **kwargs) -> Dict:
-        params = {
-            "model": kwargs.get("model") or DEFAULT_MODEL,
-            "messages": messages,
-            "temperature": kwargs.get("temperature", 0.0),
-        }
+    @staticmethod
+    def _params(messages, tools, kwargs) -> Dict[str, Any]:
+        params = {"model": kwargs.get("model") or DEFAULT_MODEL, "messages": messages}
+        if kwargs.get("temperature") is not None:
+            params["temperature"] = kwargs["temperature"]
         if kwargs.get("max_tokens") is not None:
             params["max_tokens"] = kwargs["max_tokens"]
         if tools:
             params["tools"] = tools
             params["tool_choice"] = kwargs.get("tool_choice", "auto")
+        if kwargs.get("thinking") is not None:
+            # Thinking on/off for models whose chat template has the switch
+            # (Qwen, Nemotron, Gemma...). llama.cpp and LM Studio pass it to
+            # the template; a model without the switch just ignores it.
+            params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(kwargs["thinking"])}}
+        return params
 
-        resp = self._client.chat.completions.create(**params)
-        return resp.model_dump()
+    def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None, **kwargs) -> Dict:
+        # model_dump() keeps fields beyond OpenAI's own - llama.cpp's
+        # "timings" (tokens per second), for one.
+        return self._client.chat.completions.create(**self._params(messages, tools, kwargs)).model_dump()
 
     def chat_stream(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict]] = None, **kwargs) -> Iterator[Dict]:
-        params = {
-            "model": kwargs.get("model") or DEFAULT_MODEL,
-            "messages": messages,
-            "temperature": kwargs.get("temperature", 0.0),
-        }
-        if kwargs.get("max_tokens") is not None:
-            params["max_tokens"] = kwargs["max_tokens"]
-        if tools:
-            params["tools"] = tools
-            params["tool_choice"] = kwargs.get("tool_choice", "auto")
+        params = self._params(messages, tools, kwargs)
 
         # As a context manager, so closing this generator early (see
         # _iter_in_thread) closes the HTTP response too - which is what tells
@@ -103,9 +101,34 @@ class OpenAIModel(BaseModel):
 
     _CONTEXT_CACHE_SECONDS = 30
 
+    def _llamacpp_props(self) -> Optional[Dict[str, Any]]:
+        """A llama.cpp server's /props (its loaded model's context size,
+        whether it can see...), or None if the server isn't llama.cpp.
+        Cached briefly - it's asked on every request."""
+        now = time.monotonic()
+        cache = getattr(self, "_props_cache", None)
+        if cache is None or now - cache[0] > self._CONTEXT_CACHE_SECONDS:
+            props = None
+            root = self._lmstudio_root()
+            if root:
+                try:
+                    resp = httpx.get(f"{root}/props", timeout=5)
+                    data = resp.json() if resp.status_code == 200 else None
+                    if isinstance(data, dict) and "default_generation_settings" in data:
+                        props = data
+                except Exception:
+                    pass
+            cache = self._props_cache = (now, props)
+        return cache[1]
+
     def context_length(self, model_id: str) -> Optional[int]:
-        """LM Studio: the context length `model_id` is loaded with (from
-        /api/v1/models), cached briefly - it's asked on every request."""
+        """The context length the model is loaded with: llama.cpp's
+        per-request (slot) context from /props - it serves one model, under
+        whatever name - or LM Studio's for `model_id`, from /api/v1/models.
+        Cached briefly - it's asked on every request."""
+        props = self._llamacpp_props()
+        if props:
+            return (props.get("default_generation_settings") or {}).get("n_ctx") or None
         now = time.monotonic()
         cache = getattr(self, "_context_cache", None)
         if cache is None or now - cache[0] > self._CONTEXT_CACHE_SECONDS:
@@ -132,6 +155,10 @@ class OpenAIModel(BaseModel):
         Uses LM Studio's management API (/api/v1/models, .../load,
         .../unload). Raises LoadUnavailable if the server isn't LM Studio,
         KeyError if it has no such model, RuntimeError if a step fails."""
+        if self._llamacpp_props():
+            raise LoadUnavailable(
+                "this llama.cpp server runs the one model it was started with - switch models on the server itself"
+            )
         root = self._lmstudio_root()
         try:
             listing = httpx.get(f"{root}/api/v1/models", timeout=10) if root else None
@@ -180,10 +207,19 @@ class OpenAIModel(BaseModel):
         }
 
     def model_details(self) -> Optional[Dict[str, Dict[str, Any]]]:
-        """For LM Studio: which models are loaded, and each one's type
-        ("llm", "vlm", "embeddings"...), from its own REST API
-        (/api/v0/models) - the OpenAI-style list it also serves says
-        neither. None for any other server, or if it can't be reached."""
+        """Which models are loaded, and each one's type ("llm", "vlm" -
+        can see images - or "embeddings"...). llama.cpp: its one model,
+        loaded, a "vlm" if /props says it has vision. LM Studio: from its
+        own REST API (/api/v0/models) - the OpenAI-style list says neither.
+        None for any other server, or if it can't be reached."""
+        props = self._llamacpp_props()
+        if props:
+            try:
+                ids = self.list_models()
+            except Exception:
+                return None
+            kind = "vlm" if (props.get("modalities") or {}).get("vision") else "llm"
+            return {i: {"loaded": True, "type": kind} for i in ids}
         root = self._lmstudio_root()
         if not root:
             return None

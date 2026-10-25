@@ -285,7 +285,7 @@ def test_plugins_endpoint_lists_registered_plugins(client):
     r = client.get("/v1/plugins")
     assert r.status_code == 200
     names = {p["name"] for p in r.json()["plugins"]}
-    assert {"calculate", "create_file", "read_document"} <= names
+    assert {"get_current_time", "create_file", "read_document"} <= names
     # One tool for all document formats, not one each; no example plugin.
     assert not names & {"create_document", "create_pdf", "create_presentation", "hello"}
 
@@ -336,13 +336,13 @@ def test_enabled_plugins_filters_tools_sent_to_model(client, monkeypatch):
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
 
     client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
-    assert "calculate" in [t["function"]["name"] for t in captured["tools"]]
+    assert "get_current_time" in [t["function"]["name"] for t in captured["tools"]]
 
     client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "hi"}],
-        "enabled_plugins": ["calculate", "get_current_time"],
+        "enabled_plugins": ["fetch_url", "get_current_time"],
     })
-    assert sorted(t["function"]["name"] for t in captured["tools"]) == ["calculate", "get_current_time"]
+    assert sorted(t["function"]["name"] for t in captured["tools"]) == ["fetch_url", "get_current_time"]
 
     client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "hi"}],
@@ -362,9 +362,9 @@ def test_client_supplied_tool_not_duplicated(client, monkeypatch):
     monkeypatch.setattr(main_mod, "model_impl", SpyModel())
     client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "hi"}],
-        "tools": [{"type": "function", "function": {"name": "calculate", "description": "custom override"}}],
+        "tools": [{"type": "function", "function": {"name": "get_current_time", "description": "custom override"}}],
     })
-    calculate_tools = [t for t in captured["tools"] if t["function"]["name"] == "calculate"]
+    calculate_tools = [t for t in captured["tools"] if t["function"]["name"] == "get_current_time"]
     assert len(calculate_tools) == 1
     assert calculate_tools[0]["function"]["description"] == "custom override"
 
@@ -967,7 +967,7 @@ class TestGrounding:
 
     def test_search_nudge_only_when_web_search_is_available(self, client, monkeypatch):
         assert "use web_search rather than guessing" in self._system_prompt(client, monkeypatch)
-        assert "web_search" not in self._system_prompt(client, monkeypatch, enabled_plugins=["calculate"])
+        assert "web_search" not in self._system_prompt(client, monkeypatch, enabled_plugins=["get_current_time"])
 
     def test_can_be_switched_off(self, client, monkeypatch):
         captured = {}
@@ -1139,3 +1139,61 @@ def test_web_ui_files_are_always_revalidated(client):
         r = client.get(path)
         assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
     assert "cache-control" not in client.get("/v1/status").headers
+
+
+class TestLlamaCpp:
+    """A llama.cpp server (recognised by its /props): one model, its real
+    context size, no loading on request."""
+
+    PROPS = {"default_generation_settings": {"n_ctx": 64000}, "modalities": {"vision": False}}
+
+    def _backend(self, monkeypatch, props=PROPS):
+        import httpx
+
+        def fake_get(url, timeout=None):
+            if url.endswith("/props") and props is not None:
+                return httpx.Response(200, request=httpx.Request("GET", url), json=props)
+            return httpx.Response(404, request=httpx.Request("GET", url), json={"error": "not found"})
+
+        monkeypatch.setattr(model.httpx, "get", fake_get)
+        backend = model.OpenAIModel(base_url="http://10.0.0.5:8081/v1")
+        monkeypatch.setattr(backend, "list_models", lambda: ["qwen/qwen3.8-27b"])
+        return backend
+
+    def test_context_and_details_come_from_props(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        assert backend.context_length("whatever-name") == 64000  # one model, under any name
+        assert backend.model_details() == {"qwen/qwen3.8-27b": {"loaded": True, "type": "llm"}}
+
+    def test_a_model_with_vision_is_a_vlm(self, monkeypatch):
+        backend = self._backend(monkeypatch, {**self.PROPS, "modalities": {"vision": True}})
+        assert backend.model_details()["qwen/qwen3.8-27b"]["type"] == "vlm"
+
+    def test_loading_models_is_explained(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        with pytest.raises(model.LoadUnavailable, match="llama.cpp server runs the one model"):
+            backend.load_exclusive("other")
+
+    def test_not_llama_cpp_falls_back(self, monkeypatch):
+        backend = self._backend(monkeypatch, props=None)
+        assert backend.context_length("x") is None and backend.model_details() is None
+
+
+def test_thinking_switch_reaches_the_chat_template():
+    params = model.OpenAIModel._params([], None, {"model": "m", "thinking": False})
+    assert params["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert "extra_body" not in model.OpenAIModel._params([], None, {"model": "m"})
+
+
+def test_thinking_is_passed_on_only_when_asked(client, monkeypatch):
+    seen = []
+
+    class Spy:
+        def chat(self, messages, tools=None, **kwargs):
+            seen.append(kwargs.get("thinking", "unset"))
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", Spy())
+    for extra in ({"thinking": False}, {"thinking": True}, {}, {"thinking": "no"}):
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], **extra})
+    assert seen == [False, True, "unset", "unset"]

@@ -10,13 +10,18 @@ class PluginRegistry:
     def __init__(self):
         self._registry: Dict[str, Dict] = {}
 
-    def register(self, name: str, func: Callable, spec: Dict = None, needs_chat: bool = False):
+    def register(self, name: str, func: Callable, spec: Dict = None, needs_chat: bool = False, owner_only: bool = False):
         """needs_chat: the tool acts on the chat itself (reminders do), so
-        it's only offered to requests that say which chat they're for."""
-        self._registry[name] = {"callable": func, "spec": spec, "needs_chat": needs_chat}
+        it's only offered to requests that say which chat they're for.
+        owner_only: only offered to requests marked as from the owner (see
+        main._prepare) - run_python is."""
+        self._registry[name] = {"callable": func, "spec": spec, "needs_chat": needs_chat, "owner_only": owner_only}
 
     def needs_chat(self, name: str) -> bool:
         return bool((self._registry.get(name) or {}).get("needs_chat"))
+
+    def owner_only(self, name: str) -> bool:
+        return bool((self._registry.get(name) or {}).get("owner_only"))
 
     def get(self, name: str):
         return self._registry.get(name)

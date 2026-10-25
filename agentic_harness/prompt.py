@@ -120,7 +120,7 @@ def with_personality(messages: List[Dict[str, Any]], extra: str = "") -> List[Di
 async def history_budget(backend, model_name, tools, max_tokens) -> int:
     """How many tokens of history to keep: AGENTIC_HISTORY_MAX_TOKENS - but
     if the backend says the model is loaded with a smaller context window
-    (LM Studio does), less, leaving room for the tool definitions, the
+    (llama.cpp and LM Studio do), less, leaving room for the tool definitions, the
     system prompt and the reply. Otherwise a long conversation would
     overflow the model and fail, or be cut off by the server."""
     if not hasattr(backend, "context_length"):

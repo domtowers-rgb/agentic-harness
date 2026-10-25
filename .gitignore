@@ -10,3 +10,4 @@ workspace/
 audit.log
 reminders.json
 reminders.json.tmp
+sandbox-venv/
