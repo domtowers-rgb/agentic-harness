@@ -75,8 +75,10 @@ def call_tool(fname: str, args_text: Any):
 class ToolResults(list):
     """What run_tool_calls returns: the (key, path) attachments - and
     end_turn, set when a tool asked for the turn to end there, with nothing
-    sent (stay_silent does)."""
+    sent (stay_silent does) or with just an emoji reaction (react sets
+    reaction)."""
     end_turn = False
+    reaction = None
 
 
 def run_tool_calls(
@@ -116,6 +118,8 @@ def run_tool_calls(
                 attachments.append((key, path))
             if isinstance(result, dict) and result.get("end_turn") is True:
                 attachments.end_turn = True
+                if isinstance(result.get("reaction"), str):
+                    attachments.reaction = result["reaction"]
             if isinstance(result, dict) and isinstance(result.get("attachments"), list):
                 # Several files at once (run_python's): keyed by path, so a
                 # file rewritten by a later run is sent once, as it ends up.

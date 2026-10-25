@@ -1,0 +1,7 @@
+# Runs deploy/backup.sh once - started nightly by agentic-backup.timer.
+[Unit]
+Description=Back up the agentic harness and gateway's private data
+
+[Service]
+Type=oneshot
+ExecStart=%h/agentic-harness/deploy/backup.sh

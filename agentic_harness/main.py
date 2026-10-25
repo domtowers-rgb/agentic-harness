@@ -421,6 +421,8 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
                 "object": "chat.completion", "silent": True,
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
             }
+            if results.reaction:
+                resp["reaction"] = results.reaction  # react: an emoji for the client to put on the message
             break
         resp = await _call_model(**req.model_args())
         iterations += 1

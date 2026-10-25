@@ -1,0 +1,12 @@
+# Nightly backup (see deploy/backup.sh). Persistent: if the machine was off
+# at 03:30, it runs at the next start-up instead.
+[Unit]
+Description=Nightly backup of the agentic harness and gateway's private data
+
+[Timer]
+OnCalendar=*-*-* 03:30
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

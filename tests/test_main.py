@@ -1244,3 +1244,14 @@ class TestStaySilent:
         client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
         client.post("/v1/chat/completions", json={"user": "signal:group:g", "messages": [{"role": "user", "content": "hi"}]})
         assert "stay_silent" not in offered[0] and "stay_silent" in offered[1]
+
+
+def test_a_reaction_ends_the_turn_and_is_passed_on(client, monkeypatch):
+    class Model:
+        def chat(self, messages, tools=None, **kwargs):
+            call = {"id": "c1", "type": "function", "function": {"name": "react", "arguments": '{"emoji": "\U0001f44d"}'}}
+            return {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", Model())
+    body = client.post("/v1/chat/completions", json={"user": "signal:+1", "messages": [{"role": "user", "content": "thanks!"}]}).json()
+    assert body["reaction"] == "\U0001f44d" and body["choices"][0]["message"]["content"] == ""
