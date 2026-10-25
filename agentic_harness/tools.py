@@ -72,6 +72,13 @@ def call_tool(fname: str, args_text: Any):
         return args, {"error": f"{fname} failed: {type(exc).__name__}: {exc}"}
 
 
+class ToolResults(list):
+    """What run_tool_calls returns: the (key, path) attachments - and
+    end_turn, set when a tool asked for the turn to end there, with nothing
+    sent (stay_silent does)."""
+    end_turn = False
+
+
 def run_tool_calls(
     messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None, chat=None,
 ) -> List[tuple]:
@@ -89,7 +96,7 @@ def run_tool_calls(
     collect_attachments and pass them on - see files.describe_attachments."""
     messages.append({"role": "assistant", "content": assistant_content, "tool_calls": tool_calls})
 
-    attachments = []
+    attachments = ToolResults()
     with file_ops.using_sandbox(sandbox or file_ops.SANDBOX_DIR, chat=chat):
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
@@ -107,6 +114,8 @@ def run_tool_calls(
                 title = args.get("title") if isinstance(args, dict) else None
                 key = (fname, title, args.get("format")) if title else (fname, path)
                 attachments.append((key, path))
+            if isinstance(result, dict) and result.get("end_turn") is True:
+                attachments.end_turn = True
             if isinstance(result, dict) and isinstance(result.get("attachments"), list):
                 # Several files at once (run_python's): keyed by path, so a
                 # file rewritten by a later run is sent once, as it ends up.

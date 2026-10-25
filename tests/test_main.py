@@ -1197,3 +1197,50 @@ def test_thinking_is_passed_on_only_when_asked(client, monkeypatch):
     for extra in ({"thinking": False}, {"thinking": True}, {}, {"thinking": "no"}):
         client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], **extra})
     assert seen == [False, True, "unset", "unset"]
+
+
+class TestStaySilent:
+    SILENT_CALL = {"id": "c1", "type": "function", "function": {"name": "stay_silent", "arguments": "{}"}}
+
+    def test_the_turn_ends_with_nothing_said(self, client, monkeypatch):
+        calls = []
+
+        class Model:
+            def chat(self, messages, tools=None, **kwargs):
+                calls.append(1)
+                return {"choices": [{"message": {"role": "assistant", "content": "I'll stay quiet now.", "tool_calls": [self_call]}}]}
+
+        self_call = self.SILENT_CALL
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        body = client.post("/v1/chat/completions", json={"user": "signal:group:g", "messages": [{"role": "user", "content": "Bot: hi Niamh!"}]}).json()
+        assert body["choices"][0]["message"]["content"] == "" and body["silent"] is True
+        assert len(calls) == 1  # not asked again for a reply
+
+    def test_streamed_turn_ends_there_too(self, client, monkeypatch):
+        rounds = []
+
+        class Model:
+            def chat_stream(self, messages, tools=None, **kwargs):
+                rounds.append(1)
+                yield {"choices": [{"delta": {"tool_calls": [{"index": 0, **TestStaySilent.SILENT_CALL}]}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        with client.stream("POST", "/v1/chat/completions", json={
+            "user": "signal:group:g", "stream": True, "messages": [{"role": "user", "content": "hi"}],
+        }) as r:
+            lines = [line for line in r.iter_lines() if line]
+        assert len(rounds) == 1 and lines[-1] == "data: [DONE]"
+        assert not any('"content": "' in line and '"content": ""' not in line for line in lines)
+
+    def test_only_offered_to_chats(self, client, monkeypatch):
+        offered = []
+
+        class Spy:
+            def chat(self, messages, tools=None, **kwargs):
+                offered.append({t["function"]["name"] for t in tools})
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Spy())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        client.post("/v1/chat/completions", json={"user": "signal:group:g", "messages": [{"role": "user", "content": "hi"}]})
+        assert "stay_silent" not in offered[0] and "stay_silent" in offered[1]

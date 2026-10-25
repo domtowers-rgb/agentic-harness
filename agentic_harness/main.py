@@ -411,7 +411,17 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox, req.chat))
+        results = await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox, req.chat)
+        tools.collect_attachments(attachment_paths, results)
+        if results.end_turn:
+            # stay_silent: no reply at all - not even text the model wrote
+            # alongside the call ("I'll stay quiet now"), which in a group
+            # with another bot would only start the next round.
+            resp = {
+                "object": "chat.completion", "silent": True,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+            }
+            break
         resp = await _call_model(**req.model_args())
         iterations += 1
 
@@ -499,7 +509,10 @@ async def _stream(req: ChatRequest):
                 }
                 for idx, slot in sorted(tool_call_accum.items())
             ]
-            tools.collect_attachments(attachment_paths, await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox, req.chat))
+            results = await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox, req.chat)
+            tools.collect_attachments(attachment_paths, results)
+            if results.end_turn:
+                break  # stay_silent - see _complete
             iterations += 1
             continue
 
