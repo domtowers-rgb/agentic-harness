@@ -1255,3 +1255,102 @@ def test_a_reaction_ends_the_turn_and_is_passed_on(client, monkeypatch):
     monkeypatch.setattr(main_mod, "model_impl", Model())
     body = client.post("/v1/chat/completions", json={"user": "signal:+1", "messages": [{"role": "user", "content": "thanks!"}]}).json()
     assert body["reaction"] == "\U0001f44d" and body["choices"][0]["message"]["content"] == ""
+
+
+def test_take_to_dm_is_passed_on_and_the_turn_continues(client, monkeypatch):
+    replies = iter([
+        {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "take_to_dm", "arguments": '{"message": "Carrying on here"}'}}]}}]},
+        {"choices": [{"message": {"role": "assistant", "content": "Messaging you now."}}]},
+    ])
+
+    class Model:
+        def chat(self, messages, tools=None, **kwargs):
+            return next(replies)
+
+    monkeypatch.setattr(main_mod, "model_impl", Model())
+    body = client.post("/v1/chat/completions", json={"user": "signal:group:g", "messages": [{"role": "user", "content": "DMs?"}]}).json()
+    assert body["dm"] == "Carrying on here" and body["choices"][0]["message"]["content"] == "Messaging you now."
+
+
+def test_an_empty_reply_cut_off_by_the_token_limit_says_so(client, monkeypatch):
+    class Model:
+        def chat(self, messages, tools=None, **kwargs):
+            return {"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "length"}]}
+
+    monkeypatch.setattr(main_mod, "model_impl", Model())
+    body = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hard"}]}).json()
+    assert "ran out of room" in body["choices"][0]["message"]["content"]
+
+
+def test_a_client_that_stops_waiting_stops_the_tool_loop(client, monkeypatch):
+    """/stop in agentic-gateway drops its request: the loop mustn't carry on
+    running tools and asking the model for a reply nobody will see."""
+    from starlette.requests import Request
+
+    model_calls, tool_runs = [], []
+
+    class Looping:
+        def chat(self, messages, tools=None, **kwargs):
+            model_calls.append(1)
+            call = {"id": f"c{len(model_calls)}", "type": "function", "function": {"name": "hello", "arguments": "{}"}}
+            return {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [call]}}]}
+
+    real_hello = main_mod.plugins.registry.get("hello")["callable"]
+    monkeypatch.setitem(main_mod.plugins.registry._registry, "hello", {
+        "callable": lambda **kw: tool_runs.append(1) or real_hello(**kw), "spec": None,
+    })
+
+    async def gone_after_first_tool_run(self):
+        return len(tool_runs) >= 1
+
+    monkeypatch.setattr(Request, "is_disconnected", gone_after_first_tool_run)
+    monkeypatch.setattr(main_mod, "model_impl", Looping())
+    body = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}]}).json()
+    assert body.get("abandoned") is True
+    assert (len(model_calls), len(tool_runs)) == (1, 1)  # stopped straight after - not 8 more rounds
+
+
+def test_over_budget_history_is_cut_at_stable_points():
+    """Trimmed in blocks: as a conversation grows, where it's cut stays the
+    same for several turns, so the start of the prompt doesn't change and a
+    local server can reuse its cache."""
+    def history(n):
+        return [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i:03d} " + "x" * 95} for i in range(n)]
+
+    starts = []
+    for n in range(60, 80, 2):  # ten turns, two messages each
+        kept = prompt_mod.truncate_messages(history(n), max_tokens=1000)  # ~4000 chars: about 40 messages
+        starts.append(kept[0]["content"][:4])
+        assert sum(len(m["content"]) for m in kept) <= 4000
+    assert len(set(starts)) <= 3  # it moved at most twice in ten turns, not every turn
+
+
+def test_failed_generations_are_not_silently_retried():
+    assert model.OpenAIModel(base_url="http://10.0.0.5:8081/v1")._client.max_retries == 0
+
+
+class TestStreamingProblems:
+    def _events(self, client):
+        with client.stream("POST", "/v1/chat/completions", json={"stream": True, "messages": [{"role": "user", "content": "hi"}]}) as r:
+            return [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: {")]
+
+    def test_running_out_of_room_is_explained(self, client, monkeypatch):
+        class Model:
+            def chat_stream(self, messages, tools=None, **kwargs):
+                yield {"choices": [{"delta": {"reasoning_content": "hmm " * 50}}]}
+                yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        events = self._events(client)
+        assert events[-1]["choices"][0]["delta"]["content"] == prompt_mod.OUT_OF_ROOM_REPLY
+
+    def test_a_failing_model_server_is_reported_in_the_stream(self, client, monkeypatch):
+        class Model:
+            def chat_stream(self, messages, tools=None, **kwargs):
+                yield {"choices": [{"delta": {"content": "Hel"}}]}
+                raise RuntimeError("context size exceeded")
+
+        monkeypatch.setattr(main_mod, "model_impl", Model())
+        events = self._events(client)
+        assert events[-1] == {"error": "the model server failed: context size exceeded"}

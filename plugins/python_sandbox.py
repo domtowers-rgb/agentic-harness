@@ -9,7 +9,8 @@ What a script can and can't do:
   - read and write only the current chat's own folder (its uploads, the
     files made for it) - not the home folder, the harness's .env, other
     chats or anything else on the machine;
-  - TIMEOUT_SECONDS of wall time, MEMORY_MB of memory, files up to 50 MB.
+  - TIMEOUT_SECONDS of wall time, MEMORY_MB of memory, files up to 50 MB,
+    a 256 MB scratch /tmp and MAX_PROCESSES more processes.
 Files a script creates or changes in the chat's folder are sent to the
 user (like create_file's documents).
 
@@ -25,6 +26,7 @@ Python only. To remove the feature entirely, delete this file.
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import plugins.file_ops as file_ops
@@ -41,6 +43,10 @@ MAX_CODE_CHARS = 50_000
 MAX_OUTPUT_CHARS = 6_000
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_FILES_SENT = 5
+# The sandbox's scratch /tmp lives in memory, which MEMORY_MB doesn't count.
+TMPFS_BYTES = 256 * 1024 * 1024
+# How many processes/threads a script may add (a fork bomb stops there).
+MAX_PROCESSES = 64
 # Matplotlib's font cache, built once outside the sandbox (it's slow to
 # build, and the sandbox can't keep anything between runs).
 MPL_CACHE = VENV / "mpl-cache"
@@ -64,9 +70,25 @@ def _font_cache() -> list:
     return sorted(MPL_CACHE.glob("*.json")) if MPL_CACHE.is_dir() else []
 
 
+def _threads_running() -> int:
+    """This account's threads right now. The kernel's process limit counts
+    every one of them, not just the sandbox's - so the limit given to a
+    script is this plus MAX_PROCESSES."""
+    uid, count = os.getuid(), 0
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            try:
+                if os.stat(f"/proc/{pid}").st_uid == uid:
+                    count += len(os.listdir(f"/proc/{pid}/task"))
+            except OSError:
+                pass  # gone meanwhile
+    return count
+
+
 def _command(work: Path) -> list:
     limits = [
         "prlimit", f"--as={MEMORY_MB * 1024 * 1024}", f"--fsize={MAX_FILE_BYTES}", f"--cpu={TIMEOUT_SECONDS}",
+        f"--nproc={_threads_running() + MAX_PROCESSES}",
     ] if shutil.which("prlimit") else []
     cmd = [
         *limits, BWRAP, "--unshare-all", "--die-with-parent", "--new-session",
@@ -75,7 +97,7 @@ def _command(work: Path) -> list:
         "--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
         "--ro-bind-try", "/etc/fonts", "/etc/fonts", "--ro-bind-try", "/etc/localtime", "/etc/localtime",
         "--bind", str(work), "/work", "--chdir", "/work",
-        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+        "--proc", "/proc", "--dev", "/dev", "--size", str(TMPFS_BYTES), "--tmpfs", "/tmp",
         "--clearenv",
         "--setenv", "HOME", "/tmp", "--setenv", "XDG_CACHE_HOME", "/tmp", "--setenv", "PATH", "/usr/bin",
         "--setenv", "LANG", "C.UTF-8", "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
@@ -101,6 +123,20 @@ def _snapshot(work: Path) -> dict:
     return files
 
 
+def _read_clipped(f) -> str:
+    """A script's output, from the file it went to: all of it if short, else
+    the start and the end - never the whole of a script printing forever
+    (the file itself is capped at MAX_FILE_BYTES, like any it writes)."""
+    size = f.seek(0, os.SEEK_END)
+    f.seek(0)
+    if size <= MAX_OUTPUT_CHARS * 4:
+        return _clip(f.read().decode(errors="replace"))
+    head = f.read(MAX_OUTPUT_CHARS // 2).decode(errors="replace")
+    f.seek(size - MAX_OUTPUT_CHARS // 2)
+    tail = f.read().decode(errors="replace")
+    return head + "\n...(output shortened)...\n" + tail
+
+
 def _clip(text: str) -> str:
     text = text or ""
     if len(text) <= MAX_OUTPUT_CHARS:
@@ -116,14 +152,17 @@ def run_python(code: str):
     work = file_ops.sandbox_dir()
     work.mkdir(parents=True, exist_ok=True)
     before = _snapshot(work)
-    try:
-        done = subprocess.run(_command(work), input=code, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
-        result = {"exit_code": done.returncode, "stdout": _clip(done.stdout), "stderr": _clip(done.stderr)}
-    except subprocess.TimeoutExpired as exc:
-        result = {
-            "error": f"stopped after {TIMEOUT_SECONDS} seconds - make it do less, or work in smaller steps",
-            "stdout": _clip(exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout),
-        }
+    # Output goes to files, not memory: a script stuck printing in a loop
+    # would otherwise pile it all up in the harness first.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            done = subprocess.run(_command(work), input=code.encode(), stdout=out, stderr=err, timeout=TIMEOUT_SECONDS)
+            result = {"exit_code": done.returncode, "stdout": _read_clipped(out), "stderr": _read_clipped(err)}
+        except subprocess.TimeoutExpired:
+            result = {
+                "error": f"stopped after {TIMEOUT_SECONDS} seconds - make it do less, or work in smaller steps",
+                "stdout": _read_clipped(out),
+            }
     if result.get("exit_code") not in (0, None) and not result["stderr"].strip():
         result["stderr"] = "(the script was stopped - most likely it used too much memory)"
     after = _snapshot(work)

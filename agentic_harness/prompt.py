@@ -136,9 +136,21 @@ async def history_budget(backend, model_name, tools, max_tokens) -> int:
     return max(512, min(HISTORY_MAX_TOKENS, room))
 
 
+# History over budget is trimmed this many messages at a time, counted from
+# the start - see truncate_messages.
+TRIM_BLOCK = 16
+
+
 def truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> List[Dict[str, Any]]:
     """Drop the oldest messages until the history fits max_tokens (very
     simple heuristic: ~4 chars per token).
+
+    Dropped in whole blocks of TRIM_BLOCK messages, counted from the start,
+    rather than one at a time: trimming just enough meant the conversation
+    started one message later on every turn, so the prompt changed at the
+    very beginning and a local server re-read all of it, every turn. With
+    blocks, the cut stays put for several turns, until the next block has
+    to go, and the server can reuse what it has cached in between.
 
     Never drops the newest message - previously, one long enough to blow
     the budget on its own (a pasted document, say) was dropped along with
@@ -156,8 +168,11 @@ def truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) ->
     system = messages[:1] if messages and messages[0].get("role") == "system" else []
     rest = messages[len(system):]
     budget = allowed_chars - sum(content_chars(m) for m in system)
-    while len(rest) > 1 and sum(content_chars(m) for m in rest) > budget:
-        rest.pop(0)
+    sizes = [content_chars(m) for m in rest]
+    drop = 0
+    while drop < len(rest) - 1 and sum(sizes[drop:]) > budget:
+        drop = min(drop + TRIM_BLOCK, len(rest) - 1)
+    rest = rest[drop:]
     while len(rest) > 1 and rest[0].get("role") == "tool":
         rest.pop(0)
     return system + rest
@@ -196,6 +211,13 @@ NOTES_ONLY_NUDGE = {
 }
 # If the second try is notes-only too.
 NO_ANSWER_REPLY = "Sorry, I lost my train of thought there - could you ask me again?"
+
+# A thinking model that used its whole reply budget on thinking leaves an
+# empty reply (finish_reason "length"); without this the chat sees silence.
+OUT_OF_ROOM_REPLY = (
+    "Sorry, I ran out of room while thinking that through and never got to an answer. "
+    "Try asking for less at once, or switch thinking off (/think off in Signal, or the Think button)."
+)
 
 
 def clean_reply(text):

@@ -10,12 +10,25 @@ class PluginRegistry:
     def __init__(self):
         self._registry: Dict[str, Dict] = {}
 
-    def register(self, name: str, func: Callable, spec: Dict = None, needs_chat: bool = False, owner_only: bool = False):
+    def register(
+        self, name: str, func: Callable, spec: Dict = None,
+        needs_chat: bool = False, needs_group: bool = False, owner_only: bool = False,
+    ):
         """needs_chat: the tool acts on the chat itself (reminders do), so
         it's only offered to requests that say which chat they're for.
-        owner_only: only offered to requests marked as from the owner (see
-        main._prepare) - run_python is."""
-        self._registry[name] = {"callable": func, "spec": spec, "needs_chat": needs_chat, "owner_only": owner_only}
+        needs_group: only offered in a group chat (take_to_dm).
+        owner_only: only usable by requests marked as from the owner
+        (run_python, ask_claude, read_chat). Still listed for everyone in a
+        chat - so the prompt is the same whoever speaks in a group, and the
+        model server's prompt cache holds - but refused when someone else's
+        request calls it (see tools.run_tool_calls)."""
+        self._registry[name] = {
+            "callable": func, "spec": spec, "needs_chat": needs_chat or needs_group, "needs_group": needs_group,
+            "owner_only": owner_only,
+        }
+
+    def needs_group(self, name: str) -> bool:
+        return bool((self._registry.get(name) or {}).get("needs_group"))
 
     def needs_chat(self, name: str) -> bool:
         return bool((self._registry.get(name) or {}).get("needs_chat"))

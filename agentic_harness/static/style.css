@@ -291,6 +291,9 @@ body.empty .suggestions { display: flex; }
 .speed svg.icon { width: 12px; height: 12px; }
 body.no-speed .speed { display: none; }
 
+.working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 0.9rem; min-height: 28px; }
+.working .typing { padding: 0; }
+.working .elapsed { color: var(--faint); font-variant-numeric: tabular-nums; font-size: 0.82rem; }
 .typing { display: inline-flex; gap: 5px; padding: 8px 0; }
 .typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); opacity: 0.3; animation: bounce 1.2s infinite ease-in-out; }
 .typing span:nth-child(2) { animation-delay: 0.15s; }

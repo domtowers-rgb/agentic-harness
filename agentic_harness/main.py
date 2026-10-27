@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import files, model, plugins, prompt, tools
@@ -61,24 +62,50 @@ ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]", "::1"] + [
 ]
 
 
-@app.middleware("http")
-async def reject_cross_site_requests(request: Request, call_next):
-    origin = request.headers.get("origin")
-    if origin is not None and (urlparse(origin).hostname or "") not in ALLOWED_HOSTS:
-        return JSONResponse(status_code=403, content={"detail": "cross-site request refused"})
-    return await call_next(request)
+# Both middlewares below are plain ASGI rather than FastAPI's
+# @app.middleware("http"): that kind hides a client disconnecting from the
+# request handler - so the tool loop could never tell that agentic-gateway's
+# /stop had dropped a request, and kept running code and asking the model
+# for a reply nobody would see (see _gone).
 
 
-@app.middleware("http")
-async def revalidate_web_ui(request: Request, call_next):
+class RejectCrossSiteRequests:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            origin = Headers(scope=scope).get("origin")
+            if origin is not None and (urlparse(origin).hostname or "") not in ALLOWED_HOSTS:
+                response = JSONResponse(status_code=403, content={"detail": "cross-site request refused"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+class RevalidateWebUI:
     """The web UI's files are always checked for a newer version (cheaply -
     an unchanged file is just a 304). Without this, a browser could keep
     using an old cached page with a newer script after an update."""
-    response = await call_next(request)
-    if not request.url.path.startswith("/v1/"):
-        response.headers.setdefault("Cache-Control", "no-cache")
-    return response
 
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["path"].startswith("/v1/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_revalidated(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).setdefault("cache-control", "no-cache")
+            await send(message)
+
+        await self.app(scope, receive, send_revalidated)
+
+
+app.add_middleware(RejectCrossSiteRequests)
+app.add_middleware(RevalidateWebUI)
 
 # Added last so it runs first.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
@@ -307,6 +334,7 @@ class ChatRequest:
     sandbox: Any  # the chat's own folder - its file tools, uploads and memory live there
     chat: str = None  # the chat's id (the standard "user" field), if the client sent one
     thinking: bool = None  # True/False switches a thinking model's thinking on/off; None = its default
+    owner: bool = False  # from the owner - owner-only tools may run
 
     def model_args(self, **extra) -> Dict[str, Any]:
         args = {
@@ -346,8 +374,12 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
             continue
         if not chat and plugins.registry.needs_chat(name):
             continue  # e.g. reminders: nothing could deliver them
-        if not owner and plugins.registry.owner_only(name):
-            continue  # e.g. run_python
+        if ":group:" not in (chat or "") and plugins.registry.needs_group(name):
+            continue  # e.g. take_to_dm
+        # Owner-only tools are listed whoever's asking (refused at call
+        # time instead - see tools.run_tool_calls): a list that changed with
+        # the speaker would change the prompt, and in a group with owner and
+        # others talking, the server would re-read it all every time.
         tools_.append(tool)
 
     # Trim history to fit: AGENTIC_HISTORY_MAX_TOKENS, but never more than
@@ -368,6 +400,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
         # "thinking": false asks a thinking model to answer straight away -
         # much quicker for everyday chat (see OpenAIModel._params).
         thinking=body["thinking"] if isinstance(body.get("thinking"), bool) else None,
+        owner=owner,
     )
 
 
@@ -383,10 +416,27 @@ async def chat_completions(request: Request):
     req = await _prepare(body)
     if body.get("stream", False):
         return StreamingResponse(_stream(req), media_type="text/event-stream")
-    return JSONResponse(content=await _complete(req))
+    return JSONResponse(content=await _complete(req, request))
 
 
-async def _complete(req: ChatRequest) -> Dict[str, Any]:
+async def _gone(request) -> bool:
+    """Whether the client stopped waiting - agentic-gateway's /stop, or its
+    time limit. Checked between steps of the tool loop: without it, the
+    loop carried on (running code, asking the model again) for a reply
+    nobody would ever see."""
+    if request is None or not await request.is_disconnected():
+        return False
+    print("[harness] the client stopped waiting (/stop, or it gave up) - stopping this request")
+    return True
+
+
+_ABANDONED = {
+    "object": "chat.completion", "abandoned": True,
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+}
+
+
+async def _complete(req: ChatRequest, request: Request = None) -> Dict[str, Any]:
     # Tool-calling loop: keep executing tool calls and re-prompting the model
     # until it returns a plain response. Once the iteration cap is used up,
     # one last round with tool_choice="none" asks for an answer from what it
@@ -397,6 +447,7 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
     resp = await _call_model(**req.model_args())
     iterations = 0
     attachment_paths = {}
+    dm = None
     while True:
         message = resp["choices"][0].get("message") or {}
         tool_calls = message.get("tool_calls")
@@ -411,8 +462,11 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
                 resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
             break
 
-        results = await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox, req.chat)
+        if await _gone(request):
+            return dict(_ABANDONED)
+        results = await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, message.get("content"), req.sandbox, req.chat, req.owner)
         tools.collect_attachments(attachment_paths, results)
+        dm = results.dm or dm
         if results.end_turn:
             # stay_silent: no reply at all - not even text the model wrote
             # alongside the call ("I'll stay quiet now"), which in a group
@@ -424,15 +478,21 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
             if results.reaction:
                 resp["reaction"] = results.reaction  # react: an emoji for the client to put on the message
             break
+        if await _gone(request):
+            return dict(_ABANDONED)
         resp = await _call_model(**req.model_args())
         iterations += 1
 
     # Leaked working (see clean_reply): strip it - or, if the reply was
     # nothing but working, ask once more for the actual answer.
     final = resp["choices"][0].get("message") or {}
+    if not final.get("tool_calls") and resp["choices"][0].get("finish_reason") == "length" and final.get("content") is None:
+        final["content"] = ""  # cut off before writing anything: handled just below
     if not final.get("tool_calls") and isinstance(final.get("content"), str):
         cleaned = prompt.clean_reply(final["content"])
-        if cleaned is None:
+        if not final["content"].strip() and resp["choices"][0].get("finish_reason") == "length":
+            cleaned = prompt.OUT_OF_ROOM_REPLY
+        elif cleaned is None:
             _ask_for_the_answer(req.messages, final["content"])
             resp = await _call_model(**req.model_args(tool_choice="none"))
             final = resp["choices"][0].get("message") or {}
@@ -445,6 +505,8 @@ async def _complete(req: ChatRequest) -> Dict[str, Any]:
     attachments = files.describe_attachments(attachment_paths.values(), req.sandbox)
     if attachments:
         resp["attachments"] = attachments
+    if dm:
+        resp["dm"] = dm  # take_to_dm: a private message for the client to send
     return resp
 
 
@@ -474,33 +536,49 @@ async def _stream(req: ChatRequest):
             tool_choice = "none"
         tool_call_accum = {}
         content = []
+        finish_reason = None
 
-        stream_iter = model_impl.chat_stream(**req.model_args(tool_choice=tool_choice))
+        try:
+            stream_iter = model_impl.chat_stream(**req.model_args(tool_choice=tool_choice))
+        except Exception as exc:
+            yield _event({"error": f"the model server failed: {exc}"})
+            yield "data: [DONE]\n\n"
+            return
         # aclosing: if the client goes away mid-stream (the web UI's Stop
         # button), close the model stream right away - see _iter_in_thread.
-        async with aclosing(_iter_in_thread(stream_iter)) as chunks:
-            async for chunk in chunks:
-                try:
-                    yield _event(chunk)
-                except Exception:
-                    # fallback to str
-                    yield f"data: {str(chunk)}\n\n"
-                    continue
+        try:
+            async with aclosing(_iter_in_thread(stream_iter)) as chunks:
+                async for chunk in chunks:
+                    try:
+                        yield _event(chunk)
+                    except Exception:
+                        # fallback to str
+                        yield f"data: {str(chunk)}\n\n"
+                        continue
 
-                choices = chunk.get("choices") or []
-                delta = (choices[0].get("delta") or {}) if choices else {}
-                if delta.get("content"):
-                    content.append(delta["content"])
-                for tc_delta in delta.get("tool_calls") or []:
-                    idx = tc_delta.get("index", 0)
-                    slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
-                    if tc_delta.get("id"):
-                        slot["id"] = tc_delta["id"]
-                    fn = tc_delta.get("function") or {}
-                    if fn.get("name"):
-                        slot["name"] = fn["name"]
-                    if fn.get("arguments"):
-                        slot["arguments"] += fn["arguments"]
+                    choices = chunk.get("choices") or []
+                    delta = (choices[0].get("delta") or {}) if choices else {}
+                    if choices and choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
+                    if delta.get("content"):
+                        content.append(delta["content"])
+                    for tc_delta in delta.get("tool_calls") or []:
+                        idx = tc_delta.get("index", 0)
+                        slot = tool_call_accum.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                        if tc_delta.get("id"):
+                            slot["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["arguments"] += fn["arguments"]
+        except Exception as exc:
+            # The model server failing mid-stream (it's down, the prompt
+            # doesn't fit...): said in the stream, as _complete's errors
+            # are in its response - not just a dropped connection.
+            yield _event({"error": f"the model server failed: {exc}"})
+            yield "data: [DONE]\n\n"
+            return
 
         if tool_choice == "auto" and tool_call_accum:
             tool_calls = [
@@ -511,7 +589,10 @@ async def _stream(req: ChatRequest):
                 }
                 for idx, slot in sorted(tool_call_accum.items())
             ]
-            results = await asyncio.to_thread(tools.run_tool_calls, req.messages, tool_calls, None, req.sandbox, req.chat)
+            # What the model said alongside the calls stays in the history.
+            results = await asyncio.to_thread(
+                tools.run_tool_calls, req.messages, tool_calls, "".join(content) or None, req.sandbox, req.chat, req.owner,
+            )
             tools.collect_attachments(attachment_paths, results)
             if results.end_turn:
                 break  # stay_silent - see _complete
@@ -520,6 +601,10 @@ async def _stream(req: ChatRequest):
 
         # The final round.
         text = "".join(content)
+        if not text and finish_reason == "length":
+            # Thinking used the whole reply budget (see _complete).
+            yield _event({"choices": [{"delta": {"content": prompt.OUT_OF_ROOM_REPLY}, "finish_reason": "stop"}]})
+            break
         if not text:
             if tool_choice == "none":
                 fallback = prompt.NO_ANSWER_REPLY if retried_for_answer else _tool_limit_fallback()

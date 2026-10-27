@@ -79,10 +79,12 @@ class ToolResults(list):
     reaction)."""
     end_turn = False
     reaction = None
+    dm = None  # take_to_dm: a message for the client to send the asker privately
 
 
 def run_tool_calls(
     messages: List[Dict[str, Any]], tool_calls: List[Dict[str, Any]], assistant_content=None, sandbox=None, chat=None,
+    owner: bool = False,
 ) -> List[tuple]:
     """Execute tool_calls via the plugin registry, appending the assistant and
     tool-result messages to `messages` in place. Blocking (plugins are plain
@@ -103,7 +105,11 @@ def run_tool_calls(
         for tool_call in tool_calls:
             fn = tool_call.get("function", {})
             fname = fn.get("name")
-            args, result = call_tool(fname, fn.get("arguments") or "{}")
+            if plugins.registry.owner_only(fname) and not owner:
+                # Listed for everyone (see PluginRegistry.register), usable by the owner only.
+                args, result = fn.get("arguments"), {"error": f"{fname} is only available to the owner - say so"}
+            else:
+                args, result = call_tool(fname, fn.get("arguments") or "{}")
             audit_log(fname, args, result)
             messages.append({"role": "tool", "tool_call_id": tool_call.get("id"), "content": json.dumps(result, default=str)})
             if isinstance(result, dict) and isinstance(result.get("attachment"), str):
@@ -120,6 +126,8 @@ def run_tool_calls(
                 attachments.end_turn = True
                 if isinstance(result.get("reaction"), str):
                     attachments.reaction = result["reaction"]
+            if isinstance(result, dict) and isinstance(result.get("dm"), str):
+                attachments.dm = result["dm"]
             if isinstance(result, dict) and isinstance(result.get("attachments"), list):
                 # Several files at once (run_python's): keyed by path, so a
                 # file rewritten by a later run is sent once, as it ends up.

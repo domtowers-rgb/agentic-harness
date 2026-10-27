@@ -11,3 +11,7 @@ audit.log
 reminders.json
 reminders.json.tmp
 sandbox-venv/
+# Editor swap files (vim keeps a copy of whatever is open - .env included)
+*.swp
+.*.swp
+*~

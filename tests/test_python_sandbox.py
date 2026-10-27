@@ -86,12 +86,15 @@ def test_too_much_memory_is_refused(monkeypatch):
     assert result["exit_code"] != 0 and "MemoryError" in result["stderr"]
 
 
-def test_only_offered_to_the_owner(client, monkeypatch):
+def test_listed_for_everyone_but_only_runs_for_the_owner(client, monkeypatch, chat_folder):
+    """The same tool list whoever speaks (a list that changed with the
+    speaker would defeat the model server's prompt cache in a group) - and
+    owner-only tools refused when someone else's request calls them."""
     offered = []
 
     class Spy:
         def chat(self, messages, tools=None, **kwargs):
-            offered.append({t["function"]["name"] for t in tools})
+            offered.append([t["function"]["name"] for t in tools])
             return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
 
     monkeypatch.setattr(main_mod, "model_impl", Spy())
@@ -99,8 +102,15 @@ def test_only_offered_to_the_owner(client, monkeypatch):
                         {"callable": sandbox.run_python, "spec": None, "owner_only": True})
     monkeypatch.setattr(main_mod, "_PLUGIN_TOOLS", main_mod._PLUGIN_TOOLS + [{"type": "function", "function": {"name": "run_python"}}])
     for owner in (False, True):
-        client.post("/v1/chat/completions", json={"owner": owner, "user": "signal:+1", "messages": [{"role": "user", "content": "hi"}]})
-    assert "run_python" not in offered[0] and "run_python" in offered[1]
+        client.post("/v1/chat/completions", json={"owner": owner, "user": "signal:group:g", "messages": [{"role": "user", "content": "hi"}]})
+    assert offered[0] == offered[1] and "run_python" in offered[0]
+
+    call = {"id": "c1", "function": {"name": "run_python", "arguments": json.dumps({"code": "open('x.txt', 'w').write('hi')"})}}
+    messages = []
+    tools_mod.run_tool_calls(messages, [call], sandbox=chat_folder, chat="signal:group:g", owner=False)
+    assert "only available to the owner" in messages[-1]["content"] and not (chat_folder / "x.txt").exists()
+    tools_mod.run_tool_calls(messages, [call], sandbox=chat_folder, chat="signal:group:g", owner=True)
+    assert (chat_folder / "x.txt").exists()
 
 
 def test_files_it_makes_are_attached_to_the_reply(chat_folder):
@@ -108,6 +118,22 @@ def test_files_it_makes_are_attached_to_the_reply(chat_folder):
     call = {"id": "c1", "function": {"name": "run_python", "arguments": json.dumps({"code": "open('notes.txt', 'w').write('hi')"})}}
     monkey_entry = {"callable": sandbox.run_python, "spec": None}
     plugin_loader.registry._registry.setdefault("run_python", monkey_entry)
-    found = tools_mod.run_tool_calls(messages, [call], sandbox=chat_folder, chat="signal:+1555")
+    found = tools_mod.run_tool_calls(messages, [call], sandbox=chat_folder, chat="signal:+1555", owner=True)
     assert [path for _, path in found] == ["notes.txt"]
     assert os.path.exists(chat_folder / "notes.txt")
+
+
+def test_a_fork_bomb_is_contained():
+    result = sandbox.run_python(
+        "import os\nn = 0\ntry:\n    while True:\n        if os.fork() == 0:\n            import time; time.sleep(2); os._exit(0)\n        n += 1\n"
+        "except OSError:\n    print('stopped at', n)\n"
+    )
+    assert result["stdout"].startswith("stopped at") and int(result["stdout"].split()[-1]) <= sandbox.MAX_PROCESSES
+
+
+def test_endless_output_and_a_full_tmp_are_both_bounded():
+    result = sandbox.run_python("import sys\nwhile True: sys.stdout.write('x' * 1000)")
+    assert len(result["stdout"]) < sandbox.MAX_OUTPUT_CHARS + 100  # clipped, never all of it
+    # Many files, each under the 50 MB per-file cap, together over /tmp's 256 MB:
+    result = sandbox.run_python("for i in range(8):\n    open(f'/tmp/f{i}', 'wb').write(b'x' * (40 * 1024 * 1024))")
+    assert "No space left" in result["stderr"]

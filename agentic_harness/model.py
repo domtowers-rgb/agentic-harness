@@ -54,7 +54,11 @@ class OpenAIModel(BaseModel):
             raise RuntimeError("openai package is required for OpenAIModel")
         resolved_key = api_key or os.environ.get("OPENAI_API_KEY") or "not-needed"
         resolved_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
-        self._client = OpenAI(api_key=resolved_key, base_url=resolved_base_url)
+        # No automatic retries: the library's default (2) silently re-ran a
+        # failed or timed-out generation up to three times on a local
+        # server's one slot - where the second try fails the same way, and
+        # nothing (not even a client's /stop) can interrupt the retries.
+        self._client = OpenAI(api_key=resolved_key, base_url=resolved_base_url, max_retries=0)
         self.base_url = resolved_base_url
 
     @staticmethod

@@ -154,21 +154,31 @@ function currentConversation() {
   return conversations.find((c) => c.id === currentId);
 }
 
-function saveCurrent() {
-  if (!history.length) return;
+// Save a chat's messages - into the chat `id`, or a new one if it's null.
+// Returns the chat's id.
+function saveChat(messages, id) {
+  if (!messages.length) return id;
   const now = Date.now();
-  let conv = currentConversation();
+  let conv = conversations.find((c) => c.id === id);
   if (!conv) {
-    currentId = window.crypto && crypto.randomUUID ? crypto.randomUUID() : 'c' + now + Math.random().toString(36).slice(2);
-    const first = history.find((m) => m.role === 'user');
+    id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : 'c' + now + Math.random().toString(36).slice(2);
+    const first = messages.find((m) => m.role === 'user');
     const title = ((first && (first.text || first.content)) || 'New chat').replace(/\s+/g, ' ').trim().slice(0, 60);
-    conv = { id: currentId, title, messages: history, updatedAt: now };
+    conv = { id, title, messages, updatedAt: now };
     conversations.push(conv);
-    store('currentConversationId', currentId);
   }
-  conv.messages = history;
+  conv.messages = messages;
   conv.updatedAt = now;
   saveConversations();
+  return id;
+}
+
+function saveCurrent() {
+  const id = saveChat(history, currentId);
+  if (id !== currentId) {
+    currentId = id;
+    store('currentConversationId', id);
+  }
   renderConversationList();
   renderTitle();
 }
@@ -510,6 +520,25 @@ const TOOL_LABELS = {
 };
 const toolLabel = (name) => TOOL_LABELS[name] || 'Used ' + name.replace(/_/g, ' ');
 
+// ...and while it's running, for the status line under a reply in progress.
+const TOOL_DOING = {
+  web_search: 'Searching the web',
+  fetch_url: 'Reading a web page',
+  read_document: 'Reading a document',
+  create_file: 'Making a file',
+  memory: 'Checking notes',
+  reminder: 'Sorting a reminder',
+  get_current_time: 'Checking the time',
+  run_python: 'Running some code',
+  ask_claude: 'Asking Claude',
+  ask_council: 'Asking the council',
+  create_podcast: 'Making a podcast',
+  list_files: 'Looking at files',
+  read_file: 'Reading a file',
+  write_file: 'Writing a file',
+};
+const toolDoing = (name) => TOOL_DOING[name] || 'Using ' + name.replace(/_/g, ' ');
+
 // An assistant reply's view: tool chips, thinking, the answer, actions.
 function assistantView(m, index) {
   const root = document.createElement('div');
@@ -608,6 +637,7 @@ function renderMarkdown(src) {
   const flushTable = () => {
     if (!table) return;
     const [head, ...body] = table.filter((r) => !r.every((c) => /^:?-{2,}:?$/.test(c)));
+    if (!head) { table = null; return; } // only a divider row - nothing to show
     const row = (cells, tag) => `<tr>${cells.map((c) => `<${tag}>${renderInline(c)}</${tag}>`).join('')}</tr>`;
     out.push(`<table><thead>${row(head, 'th')}</thead><tbody>${body.map((r) => row(r, 'td')).join('')}</tbody></table>`);
     table = null;
@@ -1046,13 +1076,43 @@ function apiMessages() {
 }
 
 async function runTurn() {
+  // The chat this turn belongs to - which may no longer be the one on screen
+  // by the time it finishes (switching chats stops it, but its "Stopped."
+  // reply still belongs here, not in the chat switched to).
+  const turnHistory = history;
+  const turnId = currentId;
   controller = new AbortController();
   updateSend();
   refreshLastActions();
   const view = assistantView();
   thread.appendChild(view.root);
-  view.answer.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
   scrollToEnd(true);
+
+  // What she's doing right now, and for how long - so a slow step (a long
+  // document to read, code running, Claude being asked) never looks frozen.
+  const status = document.createElement('div');
+  status.className = 'working';
+  status.innerHTML = '<span class="typing"><span></span><span></span><span></span></span><span class="what"></span><span class="elapsed"></span>';
+  view.root.insertBefore(status, view.actions);
+  const turnStart = performance.now();
+  let phase = null;
+  const tick = () => {
+    const secs = Math.floor((performance.now() - turnStart) / 1000);
+    const elapsed = secs >= 2 ? `${secs}s` : '';
+    status.querySelector('.elapsed').textContent = elapsed;
+    if (phase === 'Thinking' && view.thinking) {
+      view.thinking.querySelector('.label').textContent = 'Thinking…' + (elapsed ? ' ' + elapsed : '');
+    }
+  };
+  const setPhase = (p) => {
+    phase = p;
+    // While thinking, the "Thinking…" line shows the time instead.
+    status.hidden = !p || p === 'Thinking';
+    if (p) status.querySelector('.what').textContent = p + '…';
+    tick();
+  };
+  setPhase('Reading your message');
+  const ticker = setInterval(tick, 1000);
 
   const reply = { role: 'assistant', content: '', tools: [], reasoning: '' };
   let started = false;
@@ -1102,6 +1162,10 @@ async function runTurn() {
         let chunk;
         try { chunk = JSON.parse(data); } catch { continue; }
 
+        if (chunk.error) {
+          // The model server failed (it's down, the prompt doesn't fit...).
+          throw new Error(chunk.error);
+        }
         if (chunk.attachments) {
           // Files a tool made this turn - download links, saved with the reply.
           const links = chunk.attachments.map((a) => {
@@ -1136,6 +1200,8 @@ async function runTurn() {
           thinkEnd = now;
           reply.reasoning += delta.reasoning_content;
           setThought(view, reply.reasoning, 0, true);
+          if (phase !== 'Thinking') setPhase('Thinking');
+          else tick(); // setThought reset the label - put the time back
           scrollToEnd();
         }
         for (const tc of delta.tool_calls || []) {
@@ -1144,9 +1210,11 @@ async function runTurn() {
             reply.tools.push(name);
             addToolChip(view, name, true);
           }
+          if (name) setPhase(toolDoing(name));
         }
         if (delta.content) {
           reply.content += delta.content;
+          if (phase) setPhase(null); // the words themselves show she's working now
           showAnswer();
         }
       }
@@ -1160,6 +1228,8 @@ async function runTurn() {
       thread.appendChild(note);
     }
   } finally {
+    clearInterval(ticker);
+    status.remove();
     controller = null;
     for (const chip of view.chips.values()) chip.classList.remove('running');
     if (reply.reasoning) {
@@ -1179,9 +1249,15 @@ async function runTurn() {
       view.answer.textContent = reply.stopped ? 'Stopped.' : 'No reply.';
     }
     if (reply.content || reply.stopped || reply.tools.length) {
-      history.push(reply);
-      view.root.dataset.index = history.length - 1;
-      saveCurrent();
+      turnHistory.push(reply);
+      if (history === turnHistory) {
+        view.root.dataset.index = history.length - 1;
+        saveCurrent();
+      } else if (turnId === null || conversations.some((c) => c.id === turnId)) {
+        // Moved to another chat meanwhile: saved to its own (unless deleted).
+        saveChat(turnHistory, turnId);
+        renderConversationList();
+      }
     }
     fillActions(view, reply);
     refreshLastActions();
