@@ -827,14 +827,29 @@ async function loadPlugins() {
 }
 
 // Settings dialog
+let focusBeforeSettings = null;
 function openSettings() {
+  focusBeforeSettings = document.activeElement;
   closeSidebarOnPhone();
   settingsEl.hidden = false;
   $('settingsClose').focus();
 }
 function closeSettings() {
   settingsEl.hidden = true;
+  // Back to where you were (keyboard and screen-reader users).
+  if (focusBeforeSettings && document.contains(focusBeforeSettings)) focusBeforeSettings.focus();
 }
+// Tab stays inside the dialog while it's open.
+settingsEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const focusable = [...settingsEl.querySelectorAll('button, input, select, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 $('settingsBtn').addEventListener('click', openSettings);
 $('settingsClose').addEventListener('click', closeSettings);
 settingsEl.addEventListener('click', (e) => { if (e.target === settingsEl) closeSettings(); });
@@ -1082,6 +1097,9 @@ async function runTurn() {
   const turnHistory = history;
   const turnId = currentId;
   controller = new AbortController();
+  // Screen readers: announce the reply when it's done, not every word of it
+  // (or every tick of the status line) as it arrives.
+  log.setAttribute('aria-busy', 'true');
   updateSend();
   refreshLastActions();
   const view = assistantView();
@@ -1169,7 +1187,9 @@ async function runTurn() {
         if (chunk.attachments) {
           // Files a tool made this turn - download links, saved with the reply.
           const links = chunk.attachments.map((a) => {
-            const url = location.origin + encodeURI(a.url);
+            // encodeURI leaves ( and ) alone - which would end the markdown
+            // link early for a file like "chart (1).png".
+            const url = location.origin + encodeURI(a.url).replace(/\(/g, '%28').replace(/\)/g, '%29');
             const image = /^image\/(png|jpe?g|gif|webp|svg\+xml)$/.test(a.content_type || '');
             return (image ? `![${a.filename}](${url})\n` : '') + `[Download ${a.filename}](${url})`;
           }).join('\n');
@@ -1229,6 +1249,7 @@ async function runTurn() {
     }
   } finally {
     clearInterval(ticker);
+    log.setAttribute('aria-busy', 'false');
     status.remove();
     controller = null;
     for (const chip of view.chips.values()) chip.classList.remove('running');
