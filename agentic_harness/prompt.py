@@ -82,13 +82,20 @@ def today() -> str:
     return f"{now.strftime('%A')} {now.day} {now.strftime('%B %Y')} ({clock.zone_name()})"
 
 
-def grounding(tool_names) -> str:
+def grounding(tool_names, model_name: str = None) -> str:
     """Facts a local model can't know, and a nudge against guessing. Local
     models believe it's still the year they were trained, and answer
-    confidently from stale or invented memory - one line each helps."""
+    confidently from stale or invented memory - one line each helps. That
+    includes which model it is: asked, they guess, or go by whatever an
+    earlier message in the chat said (e.g. an old "this chat's model isn't
+    available" notice naming a different one)."""
     if not INCLUDE_GROUNDING:
         return ""
-    lines = [f"Today is {today()}."]
+    lines = [
+        f"Today is {today()}.",
+        f"You're running on the model {model_name or model.DEFAULT_MODEL} - if earlier messages name a different "
+        "model, that has since changed.",
+    ]
     if "web_search" in tool_names:
         lines.append(
             "Your knowledge has a cut-off and can be wrong: for anything current, or a fact you're not sure of, "

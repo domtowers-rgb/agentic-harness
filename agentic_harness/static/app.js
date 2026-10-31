@@ -881,6 +881,37 @@ function readDataUrl(file) {
   });
 }
 
+// Big photos are shrunk to about 2,000 pixels on the long side before upload:
+// quicker to send, and the model scales them down to roughly that anyway.
+const IMAGE_MAX_SIDE = 2000;
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+async function shrinkImage(file) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    return null; // a format the browser can't decode, such as HEIC
+  }
+  const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(bitmap.width, bitmap.height));
+  if (scale === 1 && file.size <= IMAGE_MAX_BYTES) {
+    bitmap.close();
+    return file;
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; // transparent areas would otherwise turn black
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+  if (!blob) return null;
+  const name = (file.name || 'pasted-image').replace(/\.[^.]*$/, '') + '.jpg';
+  return new File([blob], name, { type: 'image/jpeg' });
+}
+
 function renderFileChip(f) {
   const chip = fileChip(f, true);
   const state = chip.querySelector('.state');
@@ -901,12 +932,16 @@ function renderFileChip(f) {
 }
 
 async function addFiles(files) {
-  for (const file of files) {
+  for (let file of files) {
+    const kind = (file.type || '').startsWith('image/') ? 'image' : 'file';
+    if (kind === 'image') {
+      const shrunk = await shrinkImage(file);
+      if (shrunk) file = shrunk;
+    }
     const f = {
-      id: Math.random().toString(36).slice(2), name: file.name || 'pasted-image.png',
-      kind: (file.type || '').startsWith('image/') ? 'image' : 'file', status: 'uploading',
+      id: Math.random().toString(36).slice(2), name: file.name || 'pasted-image.png', kind, status: 'uploading',
     };
-    if (f.kind === 'image' && file.size < 8 * 1024 * 1024) f._dataUrl = await readDataUrl(file);
+    if (kind === 'image' && file.size <= IMAGE_MAX_BYTES) f._dataUrl = await readDataUrl(file);
     pendingFiles.push(f);
     renderFileChip(f);
     updateSend();
@@ -961,10 +996,12 @@ window.addEventListener('drop', (e) => {
 
 // What the model is told about each attachment (it reads files with its tools).
 function fileNote(f, seeing) {
-  if (f.kind === 'image' && seeing) return `[Attached image: ${f.name}]`;
+  if (f.kind === 'image' && seeing && f._dataUrl) return `[Attached image: ${f.name}]`;
   const tip = /\.(csv|xlsx?|json|tsv)$/i.test(f.name)
     ? 'Use run_python or read_document to work with it.'
-    : f.kind === 'image' ? "You can't see images, so say so if asked about it." : 'Use read_document to read it.';
+    : f.kind !== 'image' ? 'Use read_document to read it.'
+    : seeing ? "It couldn't be shown to you (the browser couldn't read its format), so say so if asked about it."
+    : "You can't see images, so say so if asked about it.";
   return `[Attached ${f.kind === 'image' ? 'image' : 'file'}: ${f.name}, saved as ${f.path}. ${tip}]`;
 }
 

@@ -938,7 +938,7 @@ class TestLoadEndpoint:
 
 
 class TestGrounding:
-    def _system_prompt(self, client, monkeypatch, enabled_plugins=None):
+    def _system_prompt(self, client, monkeypatch, enabled_plugins=None, model=None):
         captured = {}
 
         class Spy:
@@ -953,8 +953,15 @@ class TestGrounding:
         body = {"messages": [{"role": "user", "content": "hi"}]}
         if enabled_plugins is not None:
             body["enabled_plugins"] = enabled_plugins
+        if model:
+            body["model"] = model
         client.post("/v1/chat/completions", json=body)
         return captured["system"]
+
+    def test_the_model_knows_which_model_it_is(self, client, monkeypatch):
+        monkeypatch.setattr(main_mod.model, "DEFAULT_MODEL", "default-model")
+        assert "You're running on the model qwen/qwen3.8-27b" in self._system_prompt(client, monkeypatch, model="qwen/qwen3.8-27b")
+        assert "You're running on the model default-model" in self._system_prompt(client, monkeypatch)
 
     def test_todays_date_is_in_the_system_prompt(self, client, monkeypatch):
         from datetime import datetime

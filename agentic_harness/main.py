@@ -390,7 +390,7 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
     # Personality system prompt (plus today's date - see grounding): a
     # small, fixed addition on top of the (already-trimmed) conversation
     # budget, so it's never at risk of being trimmed away itself.
-    messages = prompt.with_personality(messages, prompt.grounding({t["function"]["name"] for t in tools_ if "function" in t}))
+    messages = prompt.with_personality(messages, prompt.grounding({t["function"]["name"] for t in tools_ if "function" in t}, model_name))
 
     return ChatRequest(
         messages=messages, tools=tools_, model=model_name, temperature=DEFAULT_TEMPERATURE if body.get("temperature") is None else body["temperature"],
