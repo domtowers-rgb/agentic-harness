@@ -118,6 +118,30 @@ def test_tool_call_limit_asks_for_a_final_answer_with_tool_choice_none(client, m
     assert final_call["messages"][-1] == prompt_mod.TOOL_LIMIT_NUDGE
 
 
+def test_out_of_time_asks_for_a_progress_report(client, monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: clock["now"])
+
+    class SlowModel(ScriptedModel):
+        def chat(self, messages, tools=None, **kwargs):
+            clock["now"] += 100  # each round takes 100 seconds
+            return super().chat(messages, tools=tools, **kwargs)
+
+    fake = SlowModel(*[_tool_call_response("hello", call_id=f"call_{i}") for i in range(3)], _text_response("wrote diff.py; tests left"))
+    monkeypatch.setattr(main_mod, "model_impl", fake)
+    r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "go"}], "time_limit": 250})
+
+    assert r.json()["choices"][0]["message"]["content"] == "wrote diff.py; tests left"
+    # Rounds at 100s and 200s carry on; past 250s the next is the wrap-up.
+    assert [c["tool_choice"] for c in fake.calls] == [None, None, None, "none"]
+    assert fake.calls[-1]["messages"][-1] == prompt_mod.TIME_LIMIT_NUDGE
+
+
+def test_a_nonsense_time_limit_is_ignored(client, monkeypatch):
+    for limit in (0, -5, "soon", True):
+        assert main_mod._deadline(limit) is None
+
+
 def test_unknown_tool_call_is_reported_back_to_the_model(client, monkeypatch):
     fake = ScriptedModel(_tool_call_response("does_not_exist"), _text_response("sorry, no such tool"))
     monkeypatch.setattr(main_mod, "model_impl", fake)

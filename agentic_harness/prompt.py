@@ -197,6 +197,18 @@ def truncate_messages(messages: List[Dict[str, Any]], max_tokens: int = 1500) ->
 # would sometimes still try, writing its raw tool-call syntax out as the
 # reply text. With them listed, the backend still parses such an attempt
 # into a real tool call, which the caller then replaces with a fallback.
+# The request's time_limit has passed (see main._out_of_time): wrap up with
+# a progress report, so the work isn't lost - asked to carry on, the model
+# can pick up from it.
+TIME_LIMIT_NUDGE = {
+    "role": "user",
+    "content": (
+        "You've run out of time for this request. Do not call or write out any tool calls. Reply now in plain "
+        "text: what you've done so far, where any files you made are, and what's left to do - so you can carry "
+        "on from there if asked."
+    ),
+}
+
 TOOL_LIMIT_NUDGE = {
     "role": "user",
     "content": (

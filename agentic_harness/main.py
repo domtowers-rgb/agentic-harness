@@ -20,7 +20,13 @@ if __name__ == "__main__":
     # this file would otherwise build a second, unused copy of everything -
     # every plugin loaded twice - and a plugin importing agentic_harness.main
     # (the council) would see that copy's model backend, not the live one.
-    uvicorn.run("agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=reload)
+    # timeout_graceful_shutdown: a restart doesn't wait for requests still
+    # running - seen live: a stop sat on one for systemd's full 90 seconds,
+    # then was killed anyway. Nothing would receive their replies.
+    uvicorn.run(
+        "agentic_harness.main:app", host="127.0.0.1", port=int(os.environ.get("PORT", 8000)), reload=reload,
+        timeout_graceful_shutdown=5,
+    )
     sys.exit(0)
 
 import asyncio
@@ -28,6 +34,7 @@ import json
 import os
 import queue
 import threading
+import time
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterator, List
@@ -110,7 +117,7 @@ app.add_middleware(RevalidateWebUI)
 # Added last so it runs first.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
-MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "8"))
+MAX_TOOL_ITERATIONS = int(os.environ.get("AGENTIC_MAX_TOOL_ITERATIONS", "25"))
 
 # Used whenever a request doesn't specify its own max_tokens (the web UI
 # never does). Was hardcoded at 512, which is often not enough room for a
@@ -147,8 +154,19 @@ else:
 _PLUGIN_TOOLS = [{"type": "function", "function": spec} for spec in plugins.registry.all_specs()]
 
 
-def _tool_limit_fallback() -> str:
+def _tool_limit_fallback(req=None) -> str:
+    if req is not None and _out_of_time(req):
+        return "Sorry - I ran out of time before finishing."
     return f"Sorry - I stopped after {MAX_TOOL_ITERATIONS} rounds of tool calls without reaching an answer."
+
+
+def _out_of_time(req) -> bool:
+    return req.deadline is not None and time.monotonic() >= req.deadline
+
+
+def _wrap_up_nudge(req) -> Dict[str, Any]:
+    """Tools are over for this request - out of time or rounds: which one."""
+    return prompt.TIME_LIMIT_NUDGE if _out_of_time(req) else prompt.TOOL_LIMIT_NUDGE
 
 
 async def _iter_in_thread(sync_iterable: Iterator[Dict]) -> AsyncIterator[Dict]:
@@ -335,6 +353,9 @@ class ChatRequest:
     chat: str = None  # the chat's id (the standard "user" field), if the client sent one
     thinking: bool = None  # True/False switches a thinking model's thinking on/off; None = its default
     owner: bool = False  # from the owner - owner-only tools may run
+    # time.monotonic() after which no more tool rounds start (the request's
+    # "time_limit"); the model is asked to wrap up instead - see _complete.
+    deadline: float = None
 
     def model_args(self, **extra) -> Dict[str, Any]:
         args = {
@@ -401,7 +422,19 @@ async def _prepare(body: Dict[str, Any]) -> ChatRequest:
         # much quicker for everyday chat (see OpenAIModel._params).
         thinking=body["thinking"] if isinstance(body.get("thinking"), bool) else None,
         owner=owner,
+        deadline=_deadline(body.get("time_limit")),
     )
+
+
+def _deadline(time_limit):
+    """"time_limit": seconds this request may spend on tool rounds - set by
+    a client that would otherwise give up waiting (agentic-gateway), so the
+    model reports what it got done instead of all of it being lost. The
+    round in progress still finishes, then one more call for the reply, so
+    allow for that on top."""
+    if isinstance(time_limit, bool) or not isinstance(time_limit, (int, float)) or time_limit <= 0:
+        return None
+    return time.monotonic() + time_limit
 
 
 def _ask_for_the_answer(messages: List[Dict[str, Any]], notes: str) -> None:
@@ -454,12 +487,12 @@ async def _complete(req: ChatRequest, request: Request = None) -> Dict[str, Any]
         if not tool_calls:
             break
 
-        if iterations >= MAX_TOOL_ITERATIONS:
-            req.messages.append(prompt.TOOL_LIMIT_NUDGE)
+        if iterations >= MAX_TOOL_ITERATIONS or _out_of_time(req):
+            req.messages.append(_wrap_up_nudge(req))
             resp = await _call_model(**req.model_args(tool_choice="none"))
             final = resp["choices"][0].get("message") or {}
             if final.get("tool_calls") or not (final.get("content") or "").strip():
-                resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback()}
+                resp["choices"][0]["message"] = {"role": "assistant", "content": _tool_limit_fallback(req)}
             break
 
         if await _gone(request):
@@ -531,8 +564,8 @@ async def _stream(req: ChatRequest):
     tool_choice = "auto"
     retried_for_answer = False
     while True:
-        if tool_choice == "auto" and iterations >= MAX_TOOL_ITERATIONS:
-            req.messages.append(prompt.TOOL_LIMIT_NUDGE)
+        if tool_choice == "auto" and (iterations >= MAX_TOOL_ITERATIONS or _out_of_time(req)):
+            req.messages.append(_wrap_up_nudge(req))
             tool_choice = "none"
         tool_call_accum = {}
         content = []
@@ -607,7 +640,7 @@ async def _stream(req: ChatRequest):
             break
         if not text:
             if tool_choice == "none":
-                fallback = prompt.NO_ANSWER_REPLY if retried_for_answer else _tool_limit_fallback()
+                fallback = prompt.NO_ANSWER_REPLY if retried_for_answer else _tool_limit_fallback(req)
                 yield _event({"choices": [{"delta": {"content": fallback}, "finish_reason": "stop"}]})
             break
         cleaned = prompt.clean_reply(text)
